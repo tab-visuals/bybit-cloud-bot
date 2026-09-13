@@ -16,6 +16,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 def read_root():
     return FileResponse("static/index.html")
 
+# Initialize Supabase
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 supabase: Client = None
@@ -27,21 +28,21 @@ if SUPABASE_URL and SUPABASE_KEY:
     except Exception as e:
         print(f"Supabase connection error: {e}")
 
-BINANCE_SYMBOLS = {
-    "BTC": "BTCUSDT",
-    "ETH": "ETHUSDT",
-    "SOL": "SOLUSDT",
-    "BNB": "BNBUSDT",
-    "DOGE": "DOGEUSDT",
-    "PAXG": "PAXGUSDT"
-}
+TARGET_ASSETS = ["BTC", "ETH", "SOL", "CORE", "MNT", "XAUT"]
 
 portfolio = {
     "cash": 5000.0,
-    "positions": {s: {"qty": 0.0, "entries": []} for s in BINANCE_SYMBOLS},
+    "positions": {s: {"qty": 0.0, "entries": []} for s in TARGET_ASSETS},
     "trades": [],
-    "prices": {s: 0.0 for s in BINANCE_SYMBOLS},
-    "history": {s: [] for s in BINANCE_SYMBOLS}
+    "prices": {
+        "BTC": 60000.0,
+        "ETH": 2400.0,
+        "SOL": 135.0,
+        "CORE": 0.95,
+        "MNT": 0.60,
+        "XAUT": 2500.0
+    },
+    "history": {s: [] for s in TARGET_ASSETS}
 }
 
 def load_trades_from_db():
@@ -51,9 +52,8 @@ def load_trades_from_db():
         response = supabase.table("trades").select("*").order("id", desc=True).limit(50).execute()
         if response.data:
             portfolio["trades"] = response.data
-            print(f"Loaded {len(response.data)} trades from Supabase.")
     except Exception as e:
-        print(f"Error fetching trades from Supabase: {e}")
+        print(f"Supabase load error: {e}")
 
 def log_trade_to_db(trade):
     if not supabase:
@@ -71,24 +71,40 @@ def log_trade_to_db(trade):
         }
         supabase.table("trades").insert(db_payload).execute()
     except Exception as e:
-        print(f"Error logging trade to Supabase: {e}")
+        print(f"Supabase log error: {e}")
 
 def fetch_prices():
+    # 1. Fetch majors from Binance
     try:
-        url = "https://api.binance.com/api/v3/ticker/price"
-        res = requests.get(url, timeout=5)
-        data = res.json()
-        price_lookup = {item["symbol"]: float(item["price"]) for item in data if "symbol" in item}
-
-        for asset, ticker in BINANCE_SYMBOLS.items():
-            if ticker in price_lookup:
-                price = price_lookup[ticker]
-                portfolio["prices"][asset] = price
-                portfolio["history"][asset].append(price)
-                if len(portfolio["history"][asset]) > 20:
-                    portfolio["history"][asset].pop(0)
+        res = requests.get("https://api.binance.com/api/v3/ticker/price", timeout=5).json()
+        lookup = {item["symbol"]: float(item["price"]) for item in res if "symbol" in item}
+        if "BTCUSDT" in lookup:
+            portfolio["prices"]["BTC"] = lookup["BTCUSDT"]
+        if "ETHUSDT" in lookup:
+            portfolio["prices"]["ETH"] = lookup["ETHUSDT"]
+        if "SOLUSDT" in lookup:
+            portfolio["prices"]["SOL"] = lookup["SOLUSDT"]
+        if "PAXGUSDT" in lookup:
+            portfolio["prices"]["XAUT"] = lookup["PAXGUSDT"]
     except Exception as e:
-        print(f"Price fetch error: {e}")
+        print(f"Binance fetch error: {e}")
+
+    # 2. Fetch CORE and MNT fallback from public CoinCap API
+    try:
+        cc_res = requests.get("https://api.coincap.io/v2/assets?ids=core-dao,mantle", timeout=5).json()
+        for item in cc_res.get("data", []):
+            if item["id"] == "core-dao":
+                portfolio["prices"]["CORE"] = round(float(item["priceUsd"]), 4)
+            elif item["id"] == "mantle":
+                portfolio["prices"]["MNT"] = round(float(item["priceUsd"]), 4)
+    except Exception:
+        pass
+
+    for asset in TARGET_ASSETS:
+        price = portfolio["prices"][asset]
+        portfolio["history"][asset].append(price)
+        if len(portfolio["history"][asset]) > 20:
+            portfolio["history"][asset].pop(0)
 
 def execute_buy(symbol, price, step_label, order_size=500.0):
     if portfolio["cash"] < order_size or price <= 0:
@@ -145,7 +161,6 @@ def execute_sell(symbol, price, reason):
 
 def trading_worker():
     load_trades_from_db()
-    fetch_prices()  # Pre-fetch prices before entering loop
     while True:
         fetch_prices()
         for symbol, price in portfolio["prices"].items():
@@ -179,9 +194,9 @@ def start_bot():
 def get_state():
     total_assets_val = sum(
         portfolio["positions"][s]["qty"] * (portfolio["prices"].get(s, 0.0) or 0.0)
-        for s in portfolio["positions"]
+        for s in TARGET_ASSETS
     )
-    cash = portfolio["cash"] if portfolio["cash"] is not None else 5000.0
+    cash = float(portfolio["cash"] if portfolio["cash"] is not None else 5000.0)
     total_val = round(cash + total_assets_val, 2)
     total_pnl = round(total_val - 5000.0, 2)
     pnl_pct = round((total_pnl / 5000.0) * 100, 2)
@@ -195,10 +210,10 @@ def get_state():
         "history": portfolio["history"],
         "holdings": {
             s: {
-                "qty": portfolio["positions"][s]["qty"],
+                "qty": round(portfolio["positions"][s]["qty"], 6),
                 "orders": len(portfolio["positions"][s]["entries"])
             }
-            for s in portfolio["positions"]
+            for s in TARGET_ASSETS
         },
         "trades": portfolio["trades"][:50]
     }
