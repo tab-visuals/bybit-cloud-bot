@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>AlgoTrader | Multi-Asset Portfolio</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div class="header-left">
+        <h1>⚡ AlgoTrader Multi-Asset Bot</h1>
+        <p>Autonomous Scalping: BTC, ETH, SOL, CORE, MNT &amp; XAUT</p>
+      </div>
+      <div class="header-right">
+        <span id="status-pill" class="status-badge active">Bot: Running</span>
+        <button id="toggle-btn" class="btn btn-pause">Pause Bot</button>
+      </div>
+    </header>
+
+    <div class="metrics-grid">
+      <div class="card">
+        <h3>Total Portfolio</h3>
+        <p id="balance" class="metric-value">$5,000.00</p>
+      </div>
+      <div class="card">
+        <h3>Available Cash</h3>
+        <p id="cash-balance" class="metric-value">$5,000.00</p>
+      </div>
+      <div class="card">
+        <h3>Total P&amp;L</h3>
+        <p id="pnl" class="metric-value profit">+$0.00 (+0.00%)</p>
+      </div>
+    </div>
+
+    <div class="assets-grid">
+      <div class="asset-card">
+        <h3>BTC / USDT</h3>
+        <p id="price-BTC" class="asset-price">$0.00</p>
+        <p id="hold-BTC" class="asset-hold">Holding: 0.0000 BTC (0/3)</p>
+      </div>
+      <div class="asset-card">
+        <h3>ETH / USDT</h3>
+        <p id="price-ETH" class="asset-price">$0.00</p>
+        <p id="hold-ETH" class="asset-hold">Holding: 0.0000 ETH (0/3)</p>
+      </div>
+      <div class="asset-card">
+        <h3>SOL / USDT</h3>
+        <p id="price-SOL" class="asset-price">$0.00</p>
+        <p id="hold-SOL" class="asset-hold">Holding: 0.00 SOL (0/3)</p>
+      </div>
+      <div class="asset-card">
+        <h3>CORE / USDT</h3>
+        <p id="price-CORE" class="asset-price">$0.00</p>
+        <p id="hold-CORE" class="asset-hold">Holding: 0.00 CORE (0/3)</p>
+      </div>
+      <div class="asset-card">
+        <h3>MNT / USDT</h3>
+        <p id="price-MNT" class="asset-price">$0.00</p>
+        <p id="hold-MNT" class="asset-hold">Holding: 0.00 MNT (0/3)</p>
+      </div>
+      <div class="asset-card">
+        <h3>XAUT / USDT</h3>
+        <p id="price-XAUT" class="asset-price">$0.00</p>
+        <p id="hold-XAUT" class="asset-hold">Holding: 0.0000 XAUT (0/3)</p>
+      </div>
+    </div>
+
+    <div class="charts-grid">
+      <div class="chart-card">
+        <h2>BTC / USDT</h2>
+        <div class="chart-wrapper"><canvas id="chart-BTC"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <h2>ETH / USDT</h2>
+        <div class="chart-wrapper"><canvas id="chart-ETH"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <h2>SOL / USDT</h2>
+        <div class="chart-wrapper"><canvas id="chart-SOL"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <h2>CORE / USDT</h2>
+        <div class="chart-wrapper"><canvas id="chart-CORE"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <h2>MNT / USDT</h2>
+        <div class="chart-wrapper"><canvas id="chart-MNT"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <h2>XAUT / USDT</h2>
+        <div class="chart-wrapper"><canvas id="chart-XAUT"></canvas></div>
+      </div>
+    </div>
+
+    <div class="table-card">
+      <h2>Recent Trade Executions</h2>
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Type</th>
+              <th>Asset</th>
+              <th>Execution Price</th>
+              <th>Quantity</th>
+              <th>Total Value</th>
+              <th>Trade P&amp;L</th>
+              <th>Strategy Note</th>
+            </tr>
+          </thead>
+          <tbody id="trade-log"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
