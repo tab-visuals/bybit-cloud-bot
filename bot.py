@@ -51,13 +51,13 @@ portfolio = {
     }
 }
 
-COINGECKO_IDS = {
-    "bitcoin": "BTC",
-    "ethereum": "ETH",
-    "solana": "SOL",
-    "coredaoorg": "CORE",
-    "mantle": "MNT",
-    "pax-gold": "PAXG"
+BYBIT_SYMBOLS = {
+    "BTC": "BTCUSDT",
+    "ETH": "ETHUSDT",
+    "SOL": "SOLUSDT",
+    "CORE": "COREUSDT",
+    "MNT": "MNTUSDT",
+    "PAXG": "PAXGUSDT"
 }
 
 # Fetch historical trades from Supabase on startup
@@ -92,19 +92,21 @@ def log_trade_to_db(trade):
         print(f"Error logging trade to Supabase: {e}")
 
 def fetch_prices():
-    ids = ",".join(COINGECKO_IDS.keys())
-    url = f"https://api.coingecko.com/api/v3/simple/price?ids={ids}&vs_currencies=usd"
     try:
-        res = requests.get(url, timeout=10).json()
-        for cg_id, symbol in COINGECKO_IDS.items():
-            if cg_id in res and "usd" in res[cg_id]:
-                price = res[cg_id]["usd"]
-                portfolio["prices"][symbol] = price
-                portfolio["history"][symbol].append(price)
-                if len(portfolio["history"][symbol]) > 20:
-                    portfolio["history"][symbol].pop(0)
+        url = "https://api.bybit.com/v5/market/tickers?category=spot"
+        res = requests.get(url, timeout=5).json()
+        ticker_list = res.get("result", {}).get("list", [])
+        price_lookup = {item["symbol"]: float(item["lastPrice"]) for item in ticker_list if "symbol" in item}
+        
+        for asset, ticker in BYBIT_SYMBOLS.items():
+            if ticker in price_lookup:
+                price = price_lookup[ticker]
+                portfolio["prices"][asset] = price
+                portfolio["history"][asset].append(price)
+                if len(portfolio["history"][asset]) > 20:
+                    portfolio["history"][asset].pop(0)
     except Exception as e:
-        print(f"Price fetch error: {e}")
+        print(f"Bybit price fetch error: {e}")
 
 def execute_buy(symbol, price, step_label, order_size=500.0):
     if portfolio["cash"] < order_size:
