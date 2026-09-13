@@ -10,14 +10,12 @@ from supabase import create_client, Client
 
 app = FastAPI()
 
-# Mount frontend static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/")
 def read_root():
     return FileResponse("static/index.html")
 
-# Initialize Supabase client
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 supabase: Client = None
@@ -29,38 +27,23 @@ if SUPABASE_URL and SUPABASE_KEY:
     except Exception as e:
         print(f"Supabase connection error: {e}")
 
-# Portfolio State
-portfolio = {
-    "cash": 5000.0,
-    "positions": {
-        "BTC": {"qty": 0.0, "entries": []},
-        "ETH": {"qty": 0.0, "entries": []},
-        "SOL": {"qty": 0.0, "entries": []},
-        "CORE": {"qty": 0.0, "entries": []},
-        "MNT": {"qty": 0.0, "entries": []},
-        "PAXG": {"qty": 0.0, "entries": []}
-    },
-    "trades": [],
-    "prices": {
-        "BTC": 0.0, "ETH": 0.0, "SOL": 0.0, 
-        "CORE": 0.0, "MNT": 0.0, "PAXG": 0.0
-    },
-    "history": {
-        "BTC": [], "ETH": [], "SOL": [],
-        "CORE": [], "MNT": [], "PAXG": []
-    }
-}
-
 BINANCE_SYMBOLS = {
     "BTC": "BTCUSDT",
     "ETH": "ETHUSDT",
     "SOL": "SOLUSDT",
-    "CORE": "COREUSDT",
-    "MNT": "MNTUSDT",
+    "BNB": "BNBUSDT",
+    "DOGE": "DOGEUSDT",
     "PAXG": "PAXGUSDT"
 }
 
-# Fetch historical trades from Supabase on startup
+portfolio = {
+    "cash": 5000.0,
+    "positions": {s: {"qty": 0.0, "entries": []} for s in BINANCE_SYMBOLS},
+    "trades": [],
+    "prices": {s: 0.0 for s in BINANCE_SYMBOLS},
+    "history": {s: [] for s in BINANCE_SYMBOLS}
+}
+
 def load_trades_from_db():
     if not supabase:
         return
@@ -72,7 +55,6 @@ def load_trades_from_db():
     except Exception as e:
         print(f"Error fetching trades from Supabase: {e}")
 
-# Save an execution directly to Supabase
 def log_trade_to_db(trade):
     if not supabase:
         return
@@ -94,7 +76,7 @@ def log_trade_to_db(trade):
 def fetch_prices():
     try:
         url = "https://api.binance.com/api/v3/ticker/price"
-        res = requests.get(url, timeout=6)
+        res = requests.get(url, timeout=5)
         data = res.json()
         price_lookup = {item["symbol"]: float(item["price"]) for item in data if "symbol" in item}
 
@@ -106,10 +88,10 @@ def fetch_prices():
                 if len(portfolio["history"][asset]) > 20:
                     portfolio["history"][asset].pop(0)
     except Exception as e:
-        print(f"Binance price fetch error: {e}")
+        print(f"Price fetch error: {e}")
 
 def execute_buy(symbol, price, step_label, order_size=500.0):
-    if portfolio["cash"] < order_size:
+    if portfolio["cash"] < order_size or price <= 0:
         return
     fee = round(order_size * 0.001, 2)
     net_val = order_size - fee
@@ -134,7 +116,7 @@ def execute_buy(symbol, price, step_label, order_size=500.0):
 
 def execute_sell(symbol, price, reason):
     pos = portfolio["positions"][symbol]
-    if pos["qty"] <= 0 or not pos["entries"]:
+    if pos["qty"] <= 0 or not pos["entries"] or price <= 0:
         return
 
     qty = pos["qty"]
@@ -163,6 +145,7 @@ def execute_sell(symbol, price, reason):
 
 def trading_worker():
     load_trades_from_db()
+    fetch_prices()  # Pre-fetch prices before entering loop
     while True:
         fetch_prices()
         for symbol, price in portfolio["prices"].items():
@@ -172,16 +155,13 @@ def trading_worker():
             pos = portfolio["positions"][symbol]
             entries = pos["entries"]
 
-            # Initial entry
             if len(entries) == 0:
                 execute_buy(symbol, price, "Order #1")
             else:
                 last_entry_price = entries[-1]["price"]
-                # Dip buy up to 3 grid orders
                 if len(entries) < 3 and price < (last_entry_price * 0.998):
                     execute_buy(symbol, price, f"Order #{len(entries) + 1}")
 
-                # Take Profit / Stop Loss check
                 avg_cost = sum(e["price"] * e["qty"] for e in entries) / pos["qty"]
                 if price >= avg_cost * 1.0065:
                     execute_sell(symbol, price, "Take Profit (+0.65%)")
@@ -198,16 +178,17 @@ def start_bot():
 @app.get("/state")
 def get_state():
     total_assets_val = sum(
-        portfolio["positions"][s]["qty"] * portfolio["prices"][s]
+        portfolio["positions"][s]["qty"] * (portfolio["prices"].get(s, 0.0) or 0.0)
         for s in portfolio["positions"]
     )
-    total_val = round(portfolio["cash"] + total_assets_val, 2)
+    cash = portfolio["cash"] if portfolio["cash"] is not None else 5000.0
+    total_val = round(cash + total_assets_val, 2)
     total_pnl = round(total_val - 5000.0, 2)
     pnl_pct = round((total_pnl / 5000.0) * 100, 2)
 
     return {
         "total_portfolio": total_val,
-        "available_cash": round(portfolio["cash"], 2),
+        "available_cash": round(cash, 2),
         "total_pnl": total_pnl,
         "pnl_percentage": pnl_pct,
         "prices": portfolio["prices"],
