@@ -57,8 +57,11 @@ def load_state():
 state = load_state()
 
 def save_state():
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        print(f"Failed to save state: {e}")
 
 # --- Strategy Helpers ---
 def calculate_sma(history, period=5):
@@ -92,11 +95,21 @@ def record_trade(action, coin, price, qty, total_val, pnl=None, note=""):
 # --- Main Trading Thread ---
 def trading_worker():
     session = requests.Session()
+    # Emulate browser headers to avoid Cloudflare bot blocking on cloud server IPs
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/json"
+    })
     url = "https://api.bybit.com/v5/market/tickers?category=spot"
 
     while True:
         try:
             res = session.get(url, timeout=5)
+            if res.status_code != 200:
+                print(f"Bybit returned status code {res.status_code}. Retrying...")
+                time.sleep(TICK_INTERVAL_SECONDS)
+                continue
+
             data = res.json()
             ticker_list = {item["symbol"]: float(item["lastPrice"]) for item in data.get("result", {}).get("list", [])}
             now = time.time()
