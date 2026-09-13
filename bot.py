@@ -51,7 +51,7 @@ portfolio = {
     }
 }
 
-BYBIT_SYMBOLS = {
+BINANCE_SYMBOLS = {
     "BTC": "BTCUSDT",
     "ETH": "ETHUSDT",
     "SOL": "SOLUSDT",
@@ -92,17 +92,13 @@ def log_trade_to_db(trade):
         print(f"Error logging trade to Supabase: {e}")
 
 def fetch_prices():
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
     try:
-        url = "https://api.bybit.com/v5/market/tickers?category=spot"
-        res = requests.get(url, headers=headers, timeout=8)
+        url = "https://api.binance.com/api/v3/ticker/price"
+        res = requests.get(url, timeout=6)
         data = res.json()
-        ticker_list = data.get("result", {}).get("list", [])
-        price_lookup = {item["symbol"]: float(item["lastPrice"]) for item in ticker_list if "symbol" in item}
-        
-        for asset, ticker in BYBIT_SYMBOLS.items():
+        price_lookup = {item["symbol"]: float(item["price"]) for item in data if "symbol" in item}
+
+        for asset, ticker in BINANCE_SYMBOLS.items():
             if ticker in price_lookup:
                 price = price_lookup[ticker]
                 portfolio["prices"][asset] = price
@@ -110,7 +106,7 @@ def fetch_prices():
                 if len(portfolio["history"][asset]) > 20:
                     portfolio["history"][asset].pop(0)
     except Exception as e:
-        print(f"Bybit price fetch error: {e}")
+        print(f"Binance price fetch error: {e}")
 
 def execute_buy(symbol, price, step_label, order_size=500.0):
     if portfolio["cash"] < order_size:
