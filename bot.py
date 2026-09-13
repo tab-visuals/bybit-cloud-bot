@@ -6,6 +6,8 @@ import os
 import random
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 # --- Bot Configuration ---
 INITIAL_BALANCE = 5000.00
@@ -218,6 +220,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Serve static files (HTML, CSS, JS)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/")
+def serve_dashboard():
+    return FileResponse("static/index.html")
 
 @app.get("/state")
 def get_state():
