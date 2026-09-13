@@ -13,18 +13,18 @@ BYBIT_FEE_RATE = 0.001          # 0.10% Spot fee
 COOLDOWN_SECONDS = 10 * 60      # 10-minute cooldown on BUY after exit
 ORDER_INTERVAL_SECONDS = 60     # 60s delay between scaled orders
 MAX_ORDERS_PER_COIN = 3
-TICK_INTERVAL_SECONDS = 3.5
+TICK_INTERVAL_SECONDS = 5.0     # CoinGecko rate-limit friendly
 
 TAKE_PROFIT_THRESHOLD = 0.0065  # +0.65%
 STOP_LOSS_THRESHOLD = 0.0035    # -0.35%
 
 COINS = {
-    "BTC": {"symbol": "BTCUSDT", "decimals": 4},
-    "ETH": {"symbol": "ETHUSDT", "decimals": 4},
-    "SOL": {"symbol": "SOLUSDT", "decimals": 2},
-    "CORE": {"symbol": "COREUSDT", "decimals": 2},
-    "MNT": {"symbol": "MNTUSDT", "decimals": 2},
-    "PAXG": {"symbol": "PAXGUSDT", "decimals": 4},
+    "BTC": {"symbol": "BTCUSDT", "gecko_id": "bitcoin", "decimals": 4},
+    "ETH": {"symbol": "ETHUSDT", "gecko_id": "ethereum", "decimals": 4},
+    "SOL": {"symbol": "SOLUSDT", "gecko_id": "solana", "decimals": 2},
+    "CORE": {"symbol": "COREUSDT", "gecko_id": "coredaoorg", "decimals": 2},
+    "MNT": {"symbol": "MNTUSDT", "gecko_id": "mantle", "decimals": 2},
+    "PAXG": {"symbol": "PAXGUSDT", "gecko_id": "pax-gold", "decimals": 4},
 }
 
 STATE_FILE = "trading_state.json"
@@ -100,26 +100,26 @@ def trading_worker():
         "Accept": "application/json"
     })
     
-    # Public global price ticker endpoint (accessible from US cloud instances without geoblocking)
-    url = "https://api.binance.com/api/v3/ticker/price"
+    url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana,coredaoorg,mantle,pax-gold&vs_currencies=usd"
 
     while True:
         try:
-            res = session.get(url, timeout=5)
+            res = session.get(url, timeout=10)
             if res.status_code != 200:
-                print(f"Price API status: {res.status_code}")
+                print(f"CoinGecko status error: {res.status_code}")
                 time.sleep(TICK_INTERVAL_SECONDS)
                 continue
 
             data = res.json()
-            ticker_list = {item["symbol"]: float(item["price"]) for item in data}
             now = time.time()
 
-            for coin, asset in state["assets"].items():
-                if asset["symbol"] not in ticker_list:
+            for coin, meta in COINS.items():
+                gecko_key = meta["gecko_id"]
+                if gecko_key not in data or "usd" not in data[gecko_key]:
                     continue
 
-                curr_price = ticker_list[asset["symbol"]]
+                curr_price = float(data[gecko_key]["usd"])
+                asset = state["assets"][coin]
                 asset["price"] = curr_price
                 asset["history"].append(curr_price)
                 if len(asset["history"]) > 30:
