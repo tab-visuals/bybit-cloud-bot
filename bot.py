@@ -24,7 +24,7 @@ COINS = {
     "SOL": {"symbol": "SOLUSDT", "decimals": 2},
     "CORE": {"symbol": "COREUSDT", "decimals": 2},
     "MNT": {"symbol": "MNTUSDT", "decimals": 2},
-    "XAUT": {"symbol": "XAUTUSDT", "decimals": 4},
+    "PAXG": {"symbol": "PAXGUSDT", "decimals": 4},
 }
 
 STATE_FILE = "trading_state.json"
@@ -95,23 +95,24 @@ def record_trade(action, coin, price, qty, total_val, pnl=None, note=""):
 # --- Main Trading Thread ---
 def trading_worker():
     session = requests.Session()
-    # Emulate browser headers to avoid Cloudflare bot blocking on cloud server IPs
     session.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept": "application/json"
     })
-    url = "https://api.bybit.com/v5/market/tickers?category=spot"
+    
+    # Public global price ticker endpoint (accessible from US cloud instances without geoblocking)
+    url = "https://api.binance.com/api/v3/ticker/price"
 
     while True:
         try:
             res = session.get(url, timeout=5)
             if res.status_code != 200:
-                print(f"Bybit returned status code {res.status_code}. Retrying...")
+                print(f"Price API status: {res.status_code}")
                 time.sleep(TICK_INTERVAL_SECONDS)
                 continue
 
             data = res.json()
-            ticker_list = {item["symbol"]: float(item["lastPrice"]) for item in data.get("result", {}).get("list", [])}
+            ticker_list = {item["symbol"]: float(item["price"]) for item in data}
             now = time.time()
 
             for coin, asset in state["assets"].items():
