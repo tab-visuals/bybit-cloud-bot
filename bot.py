@@ -92,10 +92,14 @@ def log_trade_to_db(trade):
         print(f"Error logging trade to Supabase: {e}")
 
 def fetch_prices():
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
     try:
         url = "https://api.bybit.com/v5/market/tickers?category=spot"
-        res = requests.get(url, timeout=5).json()
-        ticker_list = res.get("result", {}).get("list", [])
+        res = requests.get(url, headers=headers, timeout=8)
+        data = res.json()
+        ticker_list = data.get("result", {}).get("list", [])
         price_lookup = {item["symbol"]: float(item["lastPrice"]) for item in ticker_list if "symbol" in item}
         
         for asset, ticker in BYBIT_SYMBOLS.items():
