@@ -10,12 +10,18 @@ from fastapi.responses import FileResponse
 
 app = FastAPI(title="Bybit Cloud Scalper")
 
-# Mount frontend directory
+# Mount static frontend directory
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 STATE_FILE = "trading_state.json"
 BYBIT_TICKER_URL = "https://api.bybit.com/v5/market/tickers?category=spot"
 TICK_INTERVAL_SECONDS = 5.0
+
+# Standard browser headers so Bybit Cloudflare does not reject Python requests
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "application/json"
+}
 
 # Native Bybit Spot pair mappings
 ASSET_PAIRS = {
@@ -27,7 +33,7 @@ ASSET_PAIRS = {
     "XAUT": "XAUTUSDT"
 }
 
-# Scalping Strategy Parameters
+# Scalping Parameters
 BYBIT_FEE_RATE = 0.001       # 0.10% Spot fee per side
 TAKE_PROFIT_PCT = 0.0065     # +0.65% TP
 STOP_LOSS_PCT = -0.0035      # -0.35% SL
@@ -78,7 +84,7 @@ def save_state():
 def fetch_bybit_prices():
     """Fetch live Spot prices directly from Bybit V5 public tickers."""
     try:
-        resp = requests.get(BYBIT_TICKER_URL, timeout=6)
+        resp = requests.get(BYBIT_TICKER_URL, headers=HEADERS, timeout=6)
         if resp.status_code == 200:
             data = resp.json()
             items = data.get("result", {}).get("list", [])
@@ -121,7 +127,6 @@ def calculate_confidence_size(history, base_size=500.0):
         return base_size
     diffs = [history[i] - history[i - 1] for i in range(1, len(history))]
     negatives = [d for d in diffs if d < 0]
-    # Scale up order size slightly during confirmed pullbacks
     if len(negatives) >= 2:
         return round(min(base_size * 1.3, 700.0), 2)
     return base_size
@@ -253,7 +258,7 @@ def trading_worker():
                     holding_total += current_qty * curr_price
 
                 # 3. OVERALL PORTFOLIO METRICS
-                total_portfolio = state["cash"] + holding_total
+                total_portfolio = state["cash"] +  holding_total
                 net_pnl = total_portfolio - state["initial_balance"]
                 net_pnl_pct = (net_pnl / state["initial_balance"]) * 100
 
@@ -268,7 +273,6 @@ def trading_worker():
 
         time.sleep(TICK_INTERVAL_SECONDS)
 
-# Background trading thread initiation
 worker_thread = threading.Thread(target=trading_worker, daemon=True)
 
 @app.on_event("startup")
