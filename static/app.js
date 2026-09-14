@@ -21,7 +21,7 @@ let charts = {};
 let isRunning = true;
 let livePrices = {};
 
-// Initialize Chart.js instances with custom neon borders
+// Initialize Chart.js instances
 function initCharts() {
   Object.keys(ASSET_CONFIG).forEach(coin => {
     const canvas = document.getElementById(`chart-${coin.toLowerCase()}`);
@@ -162,7 +162,8 @@ function updateUI(state) {
 
   renderTradeLog(state.trade_log);
 }
-// Connect directly to Bybit V5 Native WebSocket Feed
+
+// Direct Bybit V5 Native WebSocket Feed
 function connectBybitWebSocket() {
   const wsUrl = "wss://stream.bybit.com/v5/public/spot";
   const ws = new WebSocket(wsUrl);
@@ -171,16 +172,11 @@ function connectBybitWebSocket() {
   ws.onopen = () => {
     console.log("Connected to Bybit Spot WebSocket");
     
-    // Subscribe to each ticker explicitly
-    const pairs = Object.keys(PAIR_MAP);
-    pairs.forEach(pair => {
-      ws.send(JSON.stringify({
-        op: "subscribe",
-        args: [`tickers.${pair}`]
-      }));
-    });
+    // Subscribe to all 6 ticker topics
+    const args = Object.keys(PAIR_MAP).map(p => `tickers.${p}`);
+    ws.send(JSON.stringify({ op: "subscribe", args: args }));
 
-    // 20s heartbeat ping required by Bybit
+    // Heartbeat ping every 20 seconds
     pingInterval = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ op: "ping" }));
@@ -191,13 +187,13 @@ function connectBybitWebSocket() {
   ws.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data);
-      if (data.ret_msg === "pong" || data.op === "pong") return;
+      if (data.op === "pong" || data.ret_msg === "pong") return;
 
       if (data.topic && data.topic.startsWith("tickers.") && data.data) {
-        const item = data.data;
-        const symbol = item.symbol || data.topic.split(".")[1];
+        const item = Array.isArray(data.data) ? data.data[0] : data.data;
+        const symbol = item.symbol || data.topic.replace("tickers.", "");
         const rawPrice = item.lastPrice;
-        
+
         if (rawPrice) {
           const price = parseFloat(rawPrice);
           const coin = PAIR_MAP[symbol];
@@ -205,7 +201,7 @@ function connectBybitWebSocket() {
           if (coin && !isNaN(price) && price > 0) {
             livePrices[coin] = price;
 
-            // Instantly update the DOM card
+            // Direct DOM update
             const priceElem = document.getElementById(`price-${coin.toLowerCase()}`);
             const decimals = ASSET_CONFIG[coin]?.decimals || 2;
             if (priceElem) {
@@ -225,12 +221,12 @@ function connectBybitWebSocket() {
 
   ws.onclose = () => {
     clearInterval(pingInterval);
-    console.warn("Bybit WebSocket closed. Reconnecting in 3 seconds...");
+    console.warn("WebSocket closed. Reconnecting...");
     setTimeout(connectBybitWebSocket, 3000);
   };
 }
 
-// Push latest live Bybit ticks to Python backend
+// Push live Bybit ticks to Python backend
 async function syncWithServer() {
   if (!isRunning || Object.keys(livePrices).length === 0) return;
 
