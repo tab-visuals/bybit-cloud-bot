@@ -1,249 +1,177 @@
+import os
+import json
 import time
 import threading
-import requests
-import json
-import os
-import random
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from datetime import datetime
+from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
-# --- Bot Configuration ---
-INITIAL_BALANCE = 5000.00
-BYBIT_FEE_RATE = 0.001          # 0.10% Spot fee
-COOLDOWN_SECONDS = 10 * 60      # 10-minute cooldown on BUY after exit
-ORDER_INTERVAL_SECONDS = 60     # 60s delay between scaled orders
-MAX_ORDERS_PER_COIN = 3
-TICK_INTERVAL_SECONDS = 5.0     # CoinGecko rate-limit friendly
-
-TAKE_PROFIT_THRESHOLD = 0.0065  # +0.65%
-STOP_LOSS_THRESHOLD = 0.0035    # -0.35%
-
-COINS = {
-    "BTC": {"symbol": "BTCUSDT", "gecko_id": "bitcoin", "decimals": 4},
-    "ETH": {"symbol": "ETHUSDT", "gecko_id": "ethereum", "decimals": 4},
-    "SOL": {"symbol": "SOLUSDT", "gecko_id": "solana", "decimals": 2},
-    "CORE": {"symbol": "COREUSDT", "gecko_id": "coredaoorg", "decimals": 2},
-    "MNT": {"symbol": "MNTUSDT", "gecko_id": "mantle", "decimals": 2},
-    "PAXG": {"symbol": "PAXGUSDT", "gecko_id": "pax-gold", "decimals": 4},
-}
+app = FastAPI(title="Bybit Scalper Relay")
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 STATE_FILE = "trading_state.json"
 
-# --- In-Memory State & Persistence ---
+# Scalping Parameters
+BYBIT_FEE_RATE = 0.001       # 0.10% Spot fee
+TAKE_PROFIT_PCT = 0.0065     # +0.65% TP
+STOP_LOSS_PCT = -0.0035      # -0.35% SL
+DIP_THRESHOLD_PCT = 0.002    # -0.20% dip
+MAX_ORDERS_PER_COIN = 3
+COOLDOWN_SECONDS = 600       # 10-min cooldown
+ORDER_INTERVAL_SECONDS = 60  # 60s delay
+SMA_PERIOD = 5
+
+state_lock = threading.Lock()
+
+state = {
+    "cash": 5000.00,
+    "initial_balance": 5000.00,
+    "pnl": 0.0,
+    "pnlPercent": 0.0,
+    "totalPortfolio": 5000.00,
+    "assets": {
+        "BTC": {"symbol": "BTCUSDT", "price": 0.0, "history": [], "orders": [], "decimals": 4, "lastExitTime": 0, "lastBuyTime": 0},
+        "ETH": {"symbol": "ETHUSDT", "price": 0.0, "history": [], "orders": [], "decimals": 4, "lastExitTime": 0, "lastBuyTime": 0},
+        "SOL": {"symbol": "SOLUSDT", "price": 0.0, "history": [], "orders": [], "decimals": 2, "lastExitTime": 0, "lastBuyTime": 0},
+        "CORE": {"symbol": "COREUSDT", "price": 0.0, "history": [], "orders": [], "decimals": 2, "lastExitTime": 0, "lastBuyTime": 0},
+        "MNT": {"symbol": "MNTUSDT", "price": 0.0, "history": [], "orders": [], "decimals": 2, "lastExitTime": 0, "lastBuyTime": 0},
+        "XAUT": {"symbol": "XAUTUSDT", "price": 0.0, "history": [], "orders": [], "decimals": 4, "lastExitTime": 0, "lastBuyTime": 0},
+    },
+    "trade_log": []
+}
+
 def load_state():
+    global state
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {
-        "cashBalance": INITIAL_BALANCE,
-        "tradeLog": [],
-        "assets": {
-            coin: {
-                "symbol": meta["symbol"],
-                "price": 0.0,
-                "history": [],
-                "orders": [],
-                "decimals": meta["decimals"],
-                "lastExitTime": 0,
-                "lastBuyTime": 0
-            }
-            for coin, meta in COINS.items()
-        }
-    }
-
-state = load_state()
+                state.update(json.load(f))
+        except Exception as e:
+            print(f"Error loading state: {e}")
 
 def save_state():
     try:
         with open(STATE_FILE, "w") as f:
             json.dump(state, f, indent=2)
     except Exception as e:
-        print(f"Failed to save state: {e}")
+        print(f"Error saving state: {e}")
 
-# --- Strategy Helpers ---
-def calculate_sma(history, period=5):
-    if len(history) < period:
-        return None
-    return sum(history[-period:]) / period
-
-def get_random_trade_size(cash):
-    min_trade = 200
-    max_trade = 600
-    size = random.randint(min_trade, max_trade)
-    return min(cash, size)
-
-def record_trade(action, coin, price, qty, total_val, pnl=None, note=""):
-    timestamp = time.strftime("%H:%M:%S", time.gmtime())
-    entry = {
-        "time": timestamp,
-        "type": action,
-        "asset": coin,
+def record_trade(trade_type, asset, price, qty, total_val, pnl, note):
+    state["trade_log"].insert(0, {
+        "time": datetime.now().strftime("%H:%M:%S"),
+        "type": trade_type,
+        "asset": asset,
         "price": price,
         "quantity": qty,
-        "totalValue": round(total_val, 2),
-        "pnl": round(pnl, 2) if pnl is not None else None,
+        "totalValue": total_val,
+        "pnl": pnl,
         "note": note
-    }
-    state["tradeLog"].insert(0, entry)
-    if len(state["tradeLog"]) > 100:
-        state["tradeLog"].pop()
-    save_state()
-
-# --- Main Trading Thread ---
-def trading_worker():
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "application/json"
     })
-    
-    url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana,coredaoorg,mantle,pax-gold&vs_currencies=usd"
+    if len(state["trade_log"]) > 100:
+        state["trade_log"].pop()
 
-    while True:
-        try:
-            res = session.get(url, timeout=10)
-            if res.status_code != 200:
-                print(f"CoinGecko status error: {res.status_code}")
-                time.sleep(TICK_INTERVAL_SECONDS)
+def process_tick(prices: dict):
+    """Executes scalping strategy on incoming live prices."""
+    current_time = time.time() * 1000
+    with state_lock:
+        holding_total = 0.0
+
+        for coin, coin_data in state["assets"].items():
+            curr_price = prices.get(coin)
+            if not curr_price or curr_price <= 0:
                 continue
 
-            data = res.json()
-            now = time.time()
+            coin_data["price"] = curr_price
+            coin_data["history"].append(curr_price)
+            if len(coin_data["history"]) > 30:
+                coin_data["history"].pop(0)
 
-            for coin, meta in COINS.items():
-                gecko_key = meta["gecko_id"]
-                if gecko_key not in data or "usd" not in data[gecko_key]:
-                    continue
+            orders = coin_data["orders"]
+            sma = sum(coin_data["history"][-SMA_PERIOD:]) / len(coin_data["history"][-SMA_PERIOD:]) if len(coin_data["history"]) >= SMA_PERIOD else None
 
-                curr_price = float(data[gecko_key]["usd"])
-                asset = state["assets"][coin]
-                asset["price"] = curr_price
-                asset["history"].append(curr_price)
-                if len(asset["history"]) > 30:
-                    asset["history"].pop(0)
+            # 1. EVALUATE EXITS
+            remaining = []
+            for order in orders:
+                pnl_pct = (curr_price - order["entryPrice"]) / order["entryPrice"]
+                if pnl_pct >= TAKE_PROFIT_PCT:
+                    rev = order["qty"] * curr_price
+                    net_rev = rev * (1.0 - BYBIT_FEE_RATE)
+                    trade_pnl = round(net_rev - order["cost"], 2)
+                    state["cash"] += net_rev
+                    coin_data["lastExitTime"] = current_time
+                    record_trade("SELL", coin, curr_price, order["qty"], round(net_rev, 2), trade_pnl, f"TP +{round(pnl_pct * 100, 2)}% | Net: +${trade_pnl}")
+                elif pnl_pct <= STOP_LOSS_PCT:
+                    rev = order["qty"] * curr_price
+                    net_rev = rev * (1.0 - BYBIT_FEE_RATE)
+                    trade_pnl = round(net_rev - order["cost"], 2)
+                    state["cash"] += net_rev
+                    coin_data["lastExitTime"] = current_time
+                    record_trade("STOP", coin, curr_price, order["qty"], round(net_rev, 2), trade_pnl, f"SL {round(pnl_pct * 100, 2)}% | Loss: ${trade_pnl}")
+                else:
+                    remaining.append(order)
+            coin_data["orders"] = remaining
 
-                active_orders = asset["orders"]
-                active_count = len(active_orders)
+            # 2. EVALUATE ENTRIES
+            cooldown = (current_time - coin_data.get("lastExitTime", 0)) < (COOLDOWN_SECONDS * 1000)
+            if not cooldown and len(coin_data["orders"]) < MAX_ORDERS_PER_COIN and state["cash"] >= 100.0:
+                time_since_buy = (current_time - coin_data.get("lastBuyTime", 0))
+                should_buy = False
+                entry_size = 500.0
 
-                # 1. Evaluate Exits (TP / SL)
-                for i in range(len(active_orders) - 1, -1, -1):
-                    ord_item = active_orders[i]
-                    pnl_rate = (curr_price - ord_item["entryPrice"]) / ord_item["entryPrice"]
-                    gross_sale = ord_item["qty"] * curr_price
-                    exit_fee = gross_sale * BYBIT_FEE_RATE
-                    net_sale = gross_sale - exit_fee
-                    net_pnl = net_sale - ord_item["cost"]
+                if len(coin_data["orders"]) == 0:
+                    if sma is not None and curr_price < sma:
+                        should_buy = True
+                elif time_since_buy > (ORDER_INTERVAL_SECONDS * 1000):
+                    last_entry = coin_data["orders"][-1]["entryPrice"]
+                    if curr_price < (last_entry * (1.0 - DIP_THRESHOLD_PCT)):
+                        should_buy = True
 
-                    should_exit = False
-                    reason = ""
+                if should_buy and state["cash"] >= entry_size:
+                    fee = entry_size * BYBIT_FEE_RATE
+                    usable = entry_size - fee
+                    qty = usable / curr_price
+                    coin_data["orders"].append({
+                        "id": int(current_time),
+                        "entryPrice": curr_price,
+                        "qty": qty,
+                        "cost": entry_size,
+                        "fee": fee
+                    })
+                    state["cash"] -= entry_size
+                    coin_data["lastBuyTime"] = current_time
+                    record_trade("BUY", coin, curr_price, round(qty, coin_data["decimals"]), round(entry_size, 2), None, f"Order #{len(coin_data['orders'])} (Fee: ${round(fee, 2)})")
 
-                    if pnl_rate >= TAKE_PROFIT_THRESHOLD:
-                        should_exit = True
-                        reason = "Target Profit"
-                    elif pnl_rate <= -STOP_LOSS_THRESHOLD:
-                        should_exit = True
-                        reason = "Stop Loss"
+            holding_total += sum(o["qty"] for o in coin_data["orders"]) * curr_price
 
-                    if should_exit:
-                        state["cashBalance"] += net_sale
-                        active_orders.pop(i)
-                        asset["lastExitTime"] = now
-                        record_trade(
-                            "SELL" if pnl_rate >= TAKE_PROFIT_THRESHOLD else "STOP",
-                            coin,
-                            curr_price,
-                            ord_item["qty"],
-                            net_sale,
-                            pnl=net_pnl,
-                            note=f"{reason} [10m Cool]"
-                        )
+        # Portfolio Totals
+        state["totalPortfolio"] = round(state["cash"] + holding_total, 2)
+        net_pnl = state["totalPortfolio"] - state["initial_balance"]
+        state["pnl"] = round(net_pnl, 2)
+        state["pnlPercent"] = round((net_pnl / state["initial_balance"]) * 100, 2)
+        save_state()
 
-                # 2. Evaluate Buys
-                sma = calculate_sma(asset["history"], 5)
-                is_cooling_down = (now - asset.get("lastExitTime", 0)) < COOLDOWN_SECONDS
-                has_spacing = (now - asset.get("lastBuyTime", 0)) >= ORDER_INTERVAL_SECONDS
-
-                is_dipping_further = True
-                if len(active_orders) > 0:
-                    last_entry = active_orders[-1]["entryPrice"]
-                    is_dipping_further = curr_price < (last_entry * 0.998)
-
-                if (
-                    active_count < MAX_ORDERS_PER_COIN
-                    and not is_cooling_down
-                    and has_spacing
-                    and is_dipping_further
-                    and sma is not None
-                    and curr_price < sma
-                    and state["cashBalance"] >= 200
-                ):
-                    size = get_random_trade_size(state["cashBalance"])
-                    if size >= 200:
-                        fee = size * BYBIT_FEE_RATE
-                        net_cap = size - fee
-                        qty = net_cap / curr_price
-
-                        state["cashBalance"] -= size
-                        asset["lastBuyTime"] = now
-                        active_orders.append({
-                            "id": int(now * 1000),
-                            "entryPrice": curr_price,
-                            "qty": qty,
-                            "cost": size,
-                            "entryTime": now
-                        })
-                        record_trade("BUY", coin, curr_price, qty, size, note=f"Order #{len(active_orders)} (Fee: ${fee:.2f})")
-
-            save_state()
-
-        except Exception as e:
-            print(f"Loop error: {e}")
-
-        time.sleep(TICK_INTERVAL_SECONDS)
-
-# Start trading thread in background
-thread = threading.Thread(target=trading_worker, daemon=True)
-thread.start()
-
-# --- Web API for Dashboard ---
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Serve static files (HTML, CSS, JS)
-app.mount("/static", StaticFiles(directory="static"), name="static")
+@app.on_event("startup")
+def startup_event():
+    load_state()
 
 @app.get("/")
-def serve_dashboard():
+def read_root():
     return FileResponse("static/index.html")
 
 @app.get("/state")
 def get_state():
-    holdings_val = 0.0
-    for coin, asset in state["assets"].items():
-        total_held = sum(o["qty"] for o in asset["orders"])
-        holdings_val += (total_held * asset["price"])
+    with state_lock:
+        return state
 
-    total_val = state["cashBalance"] + holdings_val
-    total_pnl = total_val - INITIAL_BALANCE
-    pnl_pct = (total_pnl / INITIAL_BALANCE) * 100
-
-    return {
-        "cashBalance": round(state["cashBalance"], 2),
-        "totalPortfolio": round(total_val, 2),
-        "pnl": round(total_pnl, 2),
-        "pnlPercent": round(pnl_pct, 2),
-        "assets": state["assets"],
-        "tradeLog": state["tradeLog"]
-    }
+@app.post("/tick")
+async def receive_tick(request: Request):
+    """Browser relays live Bybit ticker prices directly to this endpoint."""
+    try:
+        body = await request.json()
+        prices = body.get("prices", {})
+        if prices:
+            process_tick(prices)
+        return JSONResponse({"status": "ok"})
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=400)
