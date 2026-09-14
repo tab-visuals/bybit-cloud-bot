@@ -8,8 +8,6 @@ const ASSET_CONFIG = {
   XAUT: { name: "Tether Gold", color: "#eab308", decimals: 2 }
 };
 
-const BYBIT_PUBLIC_URL = "https://api.bybit.com/v5/market/tickers?category=spot";
-
 const PAIR_MAP = {
   "BTCUSDT": "BTC",
   "ETHUSDT": "ETH",
@@ -21,8 +19,9 @@ const PAIR_MAP = {
 
 let charts = {};
 let isRunning = true;
+let livePrices = {};
 
-// Initialize Chart.js instances with custom neon borders
+// Initialize Chart.js instances
 function initCharts() {
   Object.keys(ASSET_CONFIG).forEach(coin => {
     const canvas = document.getElementById(`chart-${coin.toLowerCase()}`);
@@ -49,7 +48,7 @@ function initCharts() {
       options: {
         responsive: true,
         maintainAspectRatio: false,
-        animation: { duration: 300 },
+        animation: { duration: 250 },
         plugins: {
           legend: { display: false },
           tooltip: { enabled: true, mode: "index", intersect: false }
@@ -71,7 +70,6 @@ function initCharts() {
   });
 }
 
-// Update chart lines dynamically
 function updateChartData(coin, history) {
   if (!charts[coin] || !history || history.length === 0) return;
   charts[coin].data.labels = history.map(() => "");
@@ -79,7 +77,6 @@ function updateChartData(coin, history) {
   charts[coin].update();
 }
 
-// Render recent trade executions with neon badges
 function renderTradeLog(tradeLog) {
   const tbody = document.getElementById("trade-log");
   if (!tbody || !tradeLog) return;
@@ -121,7 +118,6 @@ function renderTradeLog(tradeLog) {
   tbody.innerHTML = rowsHtml;
 }
 
-// Update top statistics and cards
 function updateUI(state) {
   const totalPort = document.getElementById("total-portfolio");
   const availCash = document.getElementById("available-cash");
@@ -148,7 +144,7 @@ function updateUI(state) {
       const decimals = ASSET_CONFIG[coin]?.decimals || 2;
       const currentPrice = Number(assetData.price || 0);
 
-      if (priceElem) {
+      if (priceElem && currentPrice > 0) {
         priceElem.innerText = `$${currentPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: decimals })}`;
       }
 
@@ -167,47 +163,75 @@ function updateUI(state) {
   renderTradeLog(state.trade_log);
 }
 
-// Fetch Bybit directly and relay to Python backend
-async function fetchBybitAndRelay() {
-  if (!isRunning) return;
+// Connect directly to Bybit V5 Native WebSocket Feed
+function connectBybitWebSocket() {
+  const wsUrl = "wss://stream.bybit.com/v5/public/spot";
+  const ws = new WebSocket(wsUrl);
+
+  ws.onopen = () => {
+    console.log("Connected to Bybit Spot WebSocket");
+    const subMsg = {
+      op: "subscribe",
+      args: Object.keys(PAIR_MAP).map(pair => `tickers.${pair}`)
+    };
+    ws.send(JSON.stringify(subMsg));
+  };
+
+  ws.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (data.topic && data.topic.startsWith("tickers.") && data.data) {
+        const symbol = data.data.symbol;
+        const price = parseFloat(data.data.lastPrice);
+        const coin = PAIR_MAP[symbol];
+
+        if (coin && price) {
+          livePrices[coin] = price;
+          const priceElem = document.getElementById(`price-${coin.toLowerCase()}`);
+          const decimals = ASSET_CONFIG[coin]?.decimals || 2;
+          if (priceElem) {
+            priceElem.innerText = `$${price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: decimals })}`;
+          }
+        }
+      }
+    } catch (e) {
+      console.error("WS Parse Error:", e);
+    }
+  };
+
+  ws.onerror = (err) => {
+    console.error("Bybit WS Error:", err);
+  };
+
+  ws.onclose = () => {
+    console.warn("Bybit WebSocket closed. Reconnecting in 3 seconds...");
+    setTimeout(connectBybitWebSocket, 3000);
+  };
+}
+
+// Push latest live Bybit ticks to Python backend
+async function syncWithServer() {
+  if (!isRunning || Object.keys(livePrices).length === 0) return;
 
   try {
-    const res = await fetch(BYBIT_PUBLIC_URL);
-    if (!res.ok) throw new Error(`Bybit response status: ${res.status}`);
-    const json = await res.json();
-    const list = json?.result?.list || [];
+    await fetch("/tick", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prices: livePrices })
+    });
 
-    const prices = {};
-    for (const item of list) {
-      if (PAIR_MAP[item.symbol]) {
-        prices[PAIR_MAP[item.symbol]] = parseFloat(item.lastPrice);
-      }
-    }
-
-    if (Object.keys(prices).length > 0) {
-      // Send prices to Python backend
-      await fetch("/tick", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prices })
-      });
-    }
-
-    // Pull current trading state back to display
-    const stateRes = await fetch("/state");
-    const stateData = await stateRes.json();
-    updateUI(stateData);
-
+    const res = await fetch("/state");
+    const state = await res.json();
+    updateUI(state);
   } catch (err) {
-    console.error("Bybit Relay Error:", err);
+    console.warn("Sync error:", err);
   }
 }
 
-// App lifecycle
 document.addEventListener("DOMContentLoaded", () => {
   initCharts();
-  fetchBybitAndRelay();
-  setInterval(fetchBybitAndRelay, 3000);
+  connectBybitWebSocket();
+  setInterval(syncWithServer, 3000);
 
   const pauseBtn = document.getElementById("pause-btn");
   if (pauseBtn) {
