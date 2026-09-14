@@ -14,7 +14,7 @@ app = FastAPI(title="Bybit Cloud Scalper")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 STATE_FILE = "trading_state.json"
-BYBIT_TICKER_URL = "https://api.bytick.com/v5/market/tickers?category=spot"
+BYBIT_TICKER_URL = "https://api-testnet.bybit.com/v5/market/tickers?category=spot"
 TICK_INTERVAL_SECONDS = 5.0
 
 # Standard browser headers so Bybit Cloudflare does not reject Python requests
