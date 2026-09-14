@@ -1,4 +1,5 @@
 import os
+import json
 import time
 import threading
 import requests
@@ -6,214 +7,281 @@ from datetime import datetime
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from supabase import create_client, Client
 
-app = FastAPI()
+app = FastAPI(title="Bybit Cloud Scalper")
 
+# Mount frontend directory
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+STATE_FILE = "trading_state.json"
+BYBIT_TICKER_URL = "https://api.bybit.com/v5/market/tickers?category=spot"
+TICK_INTERVAL_SECONDS = 5.0
+
+# Native Bybit Spot pair mappings
+ASSET_PAIRS = {
+    "BTC": "BTCUSDT",
+    "ETH": "ETHUSDT",
+    "SOL": "SOLUSDT",
+    "CORE": "COREUSDT",
+    "MNT": "MNTUSDT",
+    "XAUT": "XAUTUSDT"
+}
+
+# Scalping Strategy Parameters
+BYBIT_FEE_RATE = 0.001       # 0.10% Spot fee per side
+TAKE_PROFIT_PCT = 0.0065     # +0.65% TP
+STOP_LOSS_PCT = -0.0035      # -0.35% SL
+DIP_THRESHOLD_PCT = 0.002    # -0.20% dip to scale into next order
+MAX_ORDERS_PER_COIN = 3
+COOLDOWN_SECONDS = 600       # 10-minute cooldown on buy after exit
+ORDER_INTERVAL_SECONDS = 60  # 60s delay between scaled entries
+SMA_PERIOD = 5
+
+state_lock = threading.Lock()
+
+# Bot State Definition
+state = {
+    "cash": 5000.00,
+    "initial_balance": 5000.00,
+    "pnl": 0.0,
+    "pnlPercent": 0.0,
+    "totalPortfolio": 5000.00,
+    "assets": {
+        "BTC": {"symbol": "BTCUSDT", "price": 0.0, "lastPrice": None, "history": [], "orders": [], "decimals": 4, "lastExitTime": 0, "lastBuyTime": 0},
+        "ETH": {"symbol": "ETHUSDT", "price": 0.0, "lastPrice": None, "history": [], "orders": [], "decimals": 4, "lastExitTime": 0, "lastBuyTime": 0},
+        "SOL": {"symbol": "SOLUSDT", "price": 0.0, "lastPrice": None, "history": [], "orders": [], "decimals": 2, "lastExitTime": 0, "lastBuyTime": 0},
+        "CORE": {"symbol": "COREUSDT", "price": 0.0, "lastPrice": None, "history": [], "orders": [], "decimals": 2, "lastExitTime": 0, "lastBuyTime": 0},
+        "MNT": {"symbol": "MNTUSDT", "price": 0.0, "lastPrice": None, "history": [], "orders": [], "decimals": 2, "lastExitTime": 0, "lastBuyTime": 0},
+        "XAUT": {"symbol": "XAUTUSDT", "price": 0.0, "lastPrice": None, "history": [], "orders": [], "decimals": 4, "lastExitTime": 0, "lastBuyTime": 0},
+    },
+    "trade_log": []
+}
+
+def load_state():
+    global state
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                saved = json.load(f)
+                state.update(saved)
+                print("State loaded successfully from file.")
+        except Exception as e:
+            print(f"Error loading state file: {e}")
+
+def save_state():
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        print(f"Error writing state file: {e}")
+
+def fetch_bybit_prices():
+    """Fetch live Spot prices directly from Bybit V5 public tickers."""
+    try:
+        resp = requests.get(BYBIT_TICKER_URL, timeout=6)
+        if resp.status_code == 200:
+            data = resp.json()
+            items = data.get("result", {}).get("list", [])
+            price_map = {}
+            for item in items:
+                sym = item.get("symbol")
+                for coin, pair in ASSET_PAIRS.items():
+                    if sym == pair:
+                        price_map[coin] = float(item.get("lastPrice"))
+            return price_map
+        else:
+            print(f"Bybit API HTTP Error: {resp.status_code}")
+            return None
+    except Exception as err:
+        print(f"Network error contacting Bybit API: {err}")
+        return None
+
+def record_trade(trade_type, asset, price, qty, total_val, pnl, note):
+    trade_entry = {
+        "time": datetime.now().strftime("%H:%M:%S"),
+        "type": trade_type,
+        "asset": asset,
+        "price": price,
+        "quantity": qty,
+        "totalValue": total_val,
+        "pnl": pnl,
+        "note": note
+    }
+    state["trade_log"].insert(0, trade_entry)
+    if len(state["trade_log"]) > 100:
+        state["trade_log"].pop()
+
+def calculate_sma(history, period=SMA_PERIOD):
+    if len(history) < period:
+        return None
+    return sum(history[-period:]) / period
+
+def calculate_confidence_size(history, base_size=500.0):
+    if len(history) < 4:
+        return base_size
+    diffs = [history[i] - history[i - 1] for i in range(1, len(history))]
+    negatives = [d for d in diffs if d < 0]
+    # Scale up order size slightly during confirmed pullbacks
+    if len(negatives) >= 2:
+        return round(min(base_size * 1.3, 700.0), 2)
+    return base_size
+
+def trading_worker():
+    """Background engine running scalping strategies against live Bybit order books."""
+    time.sleep(2)
+    while True:
+        try:
+            live_prices = fetch_bybit_prices()
+            if not live_prices:
+                time.sleep(TICK_INTERVAL_SECONDS)
+                continue
+
+            current_time = time.time() * 1000
+
+            with state_lock:
+                holding_total = 0.0
+
+                for coin, coin_data in state["assets"].items():
+                    curr_price = live_prices.get(coin)
+                    if not curr_price or curr_price <= 0:
+                        continue
+
+                    coin_data["lastPrice"] = coin_data["price"]
+                    coin_data["price"] = curr_price
+                    coin_data["history"].append(curr_price)
+                    if len(coin_data["history"]) > 30:
+                        coin_data["history"].pop(0)
+
+                    orders = coin_data["orders"]
+                    sma = calculate_sma(coin_data["history"])
+
+                    # 1. EVALUATE EXITS (Take-Profit / Stop-Loss)
+                    remaining_orders = []
+                    for order in orders:
+                        pnl_pct = (curr_price - order["entryPrice"]) / order["entryPrice"]
+
+                        if pnl_pct >= TAKE_PROFIT_PCT:
+                            revenue = order["qty"] * curr_price
+                            sell_fee = revenue * BYBIT_FEE_RATE
+                            net_revenue = revenue - sell_fee
+                            trade_pnl = round(net_revenue - order["cost"], 2)
+
+                            state["cash"] += net_revenue
+                            coin_data["lastExitTime"] = current_time
+                            record_trade(
+                                "SELL",
+                                coin,
+                                curr_price,
+                                order["qty"],
+                                round(net_revenue, 2),
+                                trade_pnl,
+                                f"TP +{round(pnl_pct * 100, 2)}% | Net: +${trade_pnl}"
+                            )
+                        elif pnl_pct <= STOP_LOSS_PCT:
+                            revenue = order["qty"] * curr_price
+                            sell_fee = revenue * BYBIT_FEE_RATE
+                            net_revenue = revenue - sell_fee
+                            trade_pnl = round(net_revenue - order["cost"], 2)
+
+                            state["cash"] += net_revenue
+                            coin_data["lastExitTime"] = current_time
+                            record_trade(
+                                "STOP",
+                                coin,
+                                curr_price,
+                                order["qty"],
+                                round(net_revenue, 2),
+                                trade_pnl,
+                                f"SL {round(pnl_pct * 100, 2)}% | Loss: ${trade_pnl}"
+                            )
+                        else:
+                            remaining_orders.append(order)
+
+                    coin_data["orders"] = remaining_orders
+
+                    # 2. EVALUATE ENTRIES
+                    cooldown_active = (current_time - coin_data.get("lastExitTime", 0)) < (COOLDOWN_SECONDS * 1000)
+                    can_scale = len(coin_data["orders"]) < MAX_ORDERS_PER_COIN
+                    has_cash = state["cash"] >= 100.0
+
+                    if not cooldown_active and can_scale and has_cash:
+                        time_since_last_buy = (current_time - coin_data.get("lastBuyTime", 0))
+                        should_buy = False
+                        entry_size = 0.0
+
+                        # Initial entry rule
+                        if len(coin_data["orders"]) == 0:
+                            if sma is not None and curr_price < sma:
+                                entry_size = min(calculate_confidence_size(coin_data["history"]), state["cash"])
+                                should_buy = True
+                        # Scaled dip-buying rule
+                        elif time_since_last_buy > (ORDER_INTERVAL_SECONDS * 1000):
+                            last_entry = coin_data["orders"][-1]["entryPrice"]
+                            if curr_price < (last_entry * (1.0 - DIP_THRESHOLD_PCT)):
+                                if sma is None or curr_price < sma:
+                                    entry_size = min(calculate_confidence_size(coin_data["history"]), state["cash"])
+                                    should_buy = True
+
+                        if should_buy and entry_size >= 20.0:
+                            buy_fee = entry_size * BYBIT_FEE_RATE
+                            usable_capital = entry_size - buy_fee
+                            qty = usable_capital / curr_price
+
+                            coin_data["orders"].append({
+                                "id": int(current_time),
+                                "entryPrice": curr_price,
+                                "qty": qty,
+                                "cost": entry_size,
+                                "fee": buy_fee
+                            })
+
+                            state["cash"] -= entry_size
+                            coin_data["lastBuyTime"] = current_time
+
+                            record_trade(
+                                "BUY",
+                                coin,
+                                curr_price,
+                                round(qty, coin_data["decimals"]),
+                                round(entry_size, 2),
+                                None,
+                                f"Order #{len(coin_data['orders'])} (Fee: ${round(buy_fee, 2)})"
+                            )
+
+                    # Compute total current asset valuation
+                    current_qty = sum(o["qty"] for o in coin_data["orders"])
+                    holding_total += current_qty * curr_price
+
+                # 3. OVERALL PORTFOLIO METRICS
+                total_portfolio = state["cash"] + holding_total
+                net_pnl = total_portfolio - state["initial_balance"]
+                net_pnl_pct = (net_pnl / state["initial_balance"]) * 100
+
+                state["totalPortfolio"] = round(total_portfolio, 2)
+                state["pnl"] = round(net_pnl, 2)
+                state["pnlPercent"] = round(net_pnl_pct, 2)
+
+                save_state()
+
+        except Exception as e:
+            print(f"Error in trading cycle: {e}")
+
+        time.sleep(TICK_INTERVAL_SECONDS)
+
+# Background trading thread initiation
+worker_thread = threading.Thread(target=trading_worker, daemon=True)
+
+@app.on_event("startup")
+def startup_event():
+    load_state()
+    if not worker_thread.is_alive():
+        worker_thread.start()
 
 @app.get("/")
 def read_root():
     return FileResponse("static/index.html")
 
-# Initialize Supabase
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-supabase: Client = None
-
-if SUPABASE_URL and SUPABASE_KEY:
-    try:
-        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-        print("Connected successfully to Supabase.")
-    except Exception as e:
-        print(f"Supabase connection error: {e}")
-
-TARGET_ASSETS = ["BTC", "ETH", "SOL", "CORE", "MNT", "XAUT"]
-
-portfolio = {
-    "cash": 5000.0,
-    "positions": {s: {"qty": 0.0, "entries": []} for s in TARGET_ASSETS},
-    "trades": [],
-    "prices": {
-        "BTC": 60000.0,
-        "ETH": 2400.0,
-        "SOL": 135.0,
-        "CORE": 0.95,
-        "MNT": 0.60,
-        "XAUT": 2500.0
-    },
-    "history": {s: [] for s in TARGET_ASSETS}
-}
-
-def load_trades_from_db():
-    if not supabase:
-        return
-    try:
-        response = supabase.table("trades").select("*").order("id", desc=True).limit(50).execute()
-        if response.data:
-            portfolio["trades"] = response.data
-    except Exception as e:
-        print(f"Supabase load error: {e}")
-
-def log_trade_to_db(trade):
-    if not supabase:
-        return
-    try:
-        db_payload = {
-            "time": trade["time"],
-            "type": trade["type"],
-            "asset": trade["asset"],
-            "price": float(trade["price"]),
-            "quantity": float(trade["quantity"]),
-            "total_value": float(trade["total_value"]),
-            "pnl": float(trade["pnl"]) if trade.get("pnl") is not None else None,
-            "note": str(trade.get("note", ""))
-        }
-        supabase.table("trades").insert(db_payload).execute()
-    except Exception as e:
-        print(f"Supabase log error: {e}")
-
-def fetch_prices():
-    # 1. Fetch majors from Binance
-    try:
-        res = requests.get("https://api.binance.com/api/v3/ticker/price", timeout=5).json()
-        lookup = {item["symbol"]: float(item["price"]) for item in res if "symbol" in item}
-        if "BTCUSDT" in lookup:
-            portfolio["prices"]["BTC"] = lookup["BTCUSDT"]
-        if "ETHUSDT" in lookup:
-            portfolio["prices"]["ETH"] = lookup["ETHUSDT"]
-        if "SOLUSDT" in lookup:
-            portfolio["prices"]["SOL"] = lookup["SOLUSDT"]
-        if "PAXGUSDT" in lookup:
-            portfolio["prices"]["XAUT"] = lookup["PAXGUSDT"]
-    except Exception as e:
-        print(f"Binance fetch error: {e}")
-
-    # 2. Fetch CORE and MNT fallback from public CoinCap API
-    try:
-        cc_res = requests.get("https://api.coincap.io/v2/assets?ids=core-dao,mantle", timeout=5).json()
-        for item in cc_res.get("data", []):
-            if item["id"] == "core-dao":
-                portfolio["prices"]["CORE"] = round(float(item["priceUsd"]), 4)
-            elif item["id"] == "mantle":
-                portfolio["prices"]["MNT"] = round(float(item["priceUsd"]), 4)
-    except Exception:
-        pass
-
-    for asset in TARGET_ASSETS:
-        price = portfolio["prices"][asset]
-        portfolio["history"][asset].append(price)
-        if len(portfolio["history"][asset]) > 20:
-            portfolio["history"][asset].pop(0)
-
-def execute_buy(symbol, price, step_label, order_size=500.0):
-    if portfolio["cash"] < order_size or price <= 0:
-        return
-    fee = round(order_size * 0.001, 2)
-    net_val = order_size - fee
-    qty = round(net_val / price, 4) if price < 100 else round(net_val / price, 6)
-
-    portfolio["cash"] -= order_size
-    portfolio["positions"][symbol]["qty"] += qty
-    portfolio["positions"][symbol]["entries"].append({"price": price, "qty": qty})
-
-    trade = {
-        "time": datetime.utcnow().strftime("%H:%M:%S"),
-        "type": "BUY",
-        "asset": symbol,
-        "price": price,
-        "quantity": qty,
-        "total_value": order_size,
-        "pnl": None,
-        "note": f"{step_label} (Fee: ${fee})"
-    }
-    portfolio["trades"].insert(0, trade)
-    log_trade_to_db(trade)
-
-def execute_sell(symbol, price, reason):
-    pos = portfolio["positions"][symbol]
-    if pos["qty"] <= 0 or not pos["entries"] or price <= 0:
-        return
-
-    qty = pos["qty"]
-    gross_val = qty * price
-    fee = round(gross_val * 0.001, 2)
-    net_val = gross_val - fee
-
-    total_cost = sum(e["price"] * e["qty"] for e in pos["entries"])
-    pnl = round(net_val - total_cost, 2)
-
-    portfolio["cash"] += net_val
-    portfolio["positions"][symbol] = {"qty": 0.0, "entries": []}
-
-    trade = {
-        "time": datetime.utcnow().strftime("%H:%M:%S"),
-        "type": "SELL",
-        "asset": symbol,
-        "price": price,
-        "quantity": qty,
-        "total_value": round(net_val, 2),
-        "pnl": pnl,
-        "note": f"{reason} (Fee: ${fee})"
-    }
-    portfolio["trades"].insert(0, trade)
-    log_trade_to_db(trade)
-
-def trading_worker():
-    load_trades_from_db()
-    while True:
-        fetch_prices()
-        for symbol, price in portfolio["prices"].items():
-            if price <= 0:
-                continue
-
-            pos = portfolio["positions"][symbol]
-            entries = pos["entries"]
-
-            if len(entries) == 0:
-                execute_buy(symbol, price, "Order #1")
-            else:
-                last_entry_price = entries[-1]["price"]
-                if len(entries) < 3 and price < (last_entry_price * 0.998):
-                    execute_buy(symbol, price, f"Order #{len(entries) + 1}")
-
-                avg_cost = sum(e["price"] * e["qty"] for e in entries) / pos["qty"]
-                if price >= avg_cost * 1.0065:
-                    execute_sell(symbol, price, "Take Profit (+0.65%)")
-                elif price <= avg_cost * 0.9965:
-                    execute_sell(symbol, price, "Stop Loss (-0.35%)")
-
-        time.sleep(30)
-
-@app.on_event("startup")
-def start_bot():
-    thread = threading.Thread(target=trading_worker, daemon=True)
-    thread.start()
-
 @app.get("/state")
 def get_state():
-    total_assets_val = sum(
-        portfolio["positions"][s]["qty"] * (portfolio["prices"].get(s, 0.0) or 0.0)
-        for s in TARGET_ASSETS
-    )
-    cash = float(portfolio["cash"] if portfolio["cash"] is not None else 5000.0)
-    total_val = round(cash + total_assets_val, 2)
-    total_pnl = round(total_val - 5000.0, 2)
-    pnl_pct = round((total_pnl / 5000.0) * 100, 2)
-
-    return {
-        "total_portfolio": total_val,
-        "available_cash": round(cash, 2),
-        "total_pnl": total_pnl,
-        "pnl_percentage": pnl_pct,
-        "prices": portfolio["prices"],
-        "history": portfolio["history"],
-        "holdings": {
-            s: {
-                "qty": round(portfolio["positions"][s]["qty"], 6),
-                "orders": len(portfolio["positions"][s]["entries"])
-            }
-            for s in TARGET_ASSETS
-        },
-        "trades": portfolio["trades"][:50]
-    }
+    with state_lock:
+        return state
