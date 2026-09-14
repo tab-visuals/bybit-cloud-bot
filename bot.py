@@ -12,13 +12,13 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 STATE_FILE = "trading_state.json"
 
-# Scalping Parameters
+# Scalping Strategy Parameters
 BYBIT_FEE_RATE = 0.001       # 0.10% Spot fee
 TAKE_PROFIT_PCT = 0.0065     # +0.65% TP
 STOP_LOSS_PCT = -0.0035      # -0.35% SL
-DIP_THRESHOLD_PCT = 0.002    # -0.20% dip
+DIP_THRESHOLD_PCT = 0.002    # -0.20% dip to scale
 MAX_ORDERS_PER_COIN = 3
-COOLDOWN_SECONDS = 600       # 10-min cooldown
+COOLDOWN_SECONDS = 600       # 10-minute cooldown
 ORDER_INTERVAL_SECONDS = 60  # 60s delay
 SMA_PERIOD = 5
 
@@ -31,12 +31,12 @@ state = {
     "pnlPercent": 0.0,
     "totalPortfolio": 5000.00,
     "assets": {
-        "BTC": {"symbol": "BTCUSDT", "price": 0.0, "history": [], "orders": [], "decimals": 4, "lastExitTime": 0, "lastBuyTime": 0},
-        "ETH": {"symbol": "ETHUSDT", "price": 0.0, "history": [], "orders": [], "decimals": 4, "lastExitTime": 0, "lastBuyTime": 0},
+        "BTC": {"symbol": "BTCUSDT", "price": 0.0, "history": [], "orders": [], "decimals": 2, "lastExitTime": 0, "lastBuyTime": 0},
+        "ETH": {"symbol": "ETHUSDT", "price": 0.0, "history": [], "orders": [], "decimals": 2, "lastExitTime": 0, "lastBuyTime": 0},
         "SOL": {"symbol": "SOLUSDT", "price": 0.0, "history": [], "orders": [], "decimals": 2, "lastExitTime": 0, "lastBuyTime": 0},
-        "CORE": {"symbol": "COREUSDT", "price": 0.0, "history": [], "orders": [], "decimals": 2, "lastExitTime": 0, "lastBuyTime": 0},
-        "MNT": {"symbol": "MNTUSDT", "price": 0.0, "history": [], "orders": [], "decimals": 2, "lastExitTime": 0, "lastBuyTime": 0},
-        "XAUT": {"symbol": "XAUTUSDT", "price": 0.0, "history": [], "orders": [], "decimals": 4, "lastExitTime": 0, "lastBuyTime": 0},
+        "CORE": {"symbol": "COREUSDT", "price": 0.0, "history": [], "orders": [], "decimals": 4, "lastExitTime": 0, "lastBuyTime": 0},
+        "MNT": {"symbol": "MNTUSDT", "price": 0.0, "history": [], "orders": [], "decimals": 4, "lastExitTime": 0, "lastBuyTime": 0},
+        "XAUT": {"symbol": "XAUTUSDT", "price": 0.0, "history": [], "orders": [], "decimals": 2, "lastExitTime": 0, "lastBuyTime": 0},
     },
     "trade_log": []
 }
@@ -72,7 +72,7 @@ def record_trade(trade_type, asset, price, qty, total_val, pnl, note):
         state["trade_log"].pop()
 
 def process_tick(prices: dict):
-    """Executes scalping strategy on incoming live prices."""
+    """Executes scalping strategy on incoming live Bybit prices."""
     current_time = time.time() * 1000
     with state_lock:
         holding_total = 0.0
@@ -90,7 +90,7 @@ def process_tick(prices: dict):
             orders = coin_data["orders"]
             sma = sum(coin_data["history"][-SMA_PERIOD:]) / len(coin_data["history"][-SMA_PERIOD:]) if len(coin_data["history"]) >= SMA_PERIOD else None
 
-            # 1. EVALUATE EXITS
+            # 1. EVALUATE EXITS (TP / SL)
             remaining = []
             for order in orders:
                 pnl_pct = (curr_price - order["entryPrice"]) / order["entryPrice"]
@@ -144,7 +144,7 @@ def process_tick(prices: dict):
 
             holding_total += sum(o["qty"] for o in coin_data["orders"]) * curr_price
 
-        # Portfolio Totals
+        # Portfolio Balance Aggregates
         state["totalPortfolio"] = round(state["cash"] + holding_total, 2)
         net_pnl = state["totalPortfolio"] - state["initial_balance"]
         state["pnl"] = round(net_pnl, 2)
