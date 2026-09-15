@@ -13,15 +13,15 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 STATE_FILE = "trading_state.json"
 
-# Scalping Strategy Parameters
+# Scalping Strategy Parameters (Balanced against fees & volatility)
 BYBIT_FEE_RATE = 0.001       # 0.10% Spot fee
-TAKE_PROFIT_PCT = 0.0065     # +0.65% TP
-STOP_LOSS_PCT = -0.0035      # -0.35% SL
-DIP_THRESHOLD_PCT = 0.002    # -0.20% dip to scale
+TAKE_PROFIT_PCT = 0.0150     # +1.50% TP (covers round-trip fees with solid profit)
+STOP_LOSS_PCT = -0.0100      # -1.00% SL (avoids getting stopped out by micro-chop)
+DIP_THRESHOLD_PCT = 0.0075   # -0.75% dip required to average down
 MAX_ORDERS_PER_COIN = 3
-COOLDOWN_SECONDS = 600       # 10-minute cooldown
-ORDER_INTERVAL_SECONDS = 60  # 60s delay
-SMA_PERIOD = 5
+COOLDOWN_SECONDS = 300       # 5-minute cooldown after exit
+ORDER_INTERVAL_SECONDS = 90  # 90s delay between scale-in entries
+SMA_PERIOD = 20              # 20-tick rolling average (~60s) to smooth out tick noise
 
 state_lock = threading.Lock()
 
@@ -85,7 +85,7 @@ def process_tick(prices: dict):
 
             coin_data["price"] = curr_price
             coin_data["history"].append(curr_price)
-            if len(coin_data["history"]) > 30:
+            if len(coin_data["history"]) > 40:
                 coin_data["history"].pop(0)
 
             orders = coin_data["orders"]
@@ -128,7 +128,7 @@ def process_tick(prices: dict):
                         should_buy = True
 
                 if should_buy:
-                    # Random integer between 200 and 600, capped by available cash
+                    # Random integer between $200 and $600 (no cents)
                     max_affordable = min(600, int(state["cash"]))
                     if max_affordable >= 200:
                         entry_size = float(random.randint(200, max_affordable))
@@ -177,12 +177,13 @@ def get_state():
 
 @app.post("/tick")
 async def receive_tick(request: Request):
-    """Browser relays live Bybit ticker prices directly to this endpoint."""
+    """Processes incoming prices and returns the latest state in a single round-trip."""
     try:
         body = await request.json()
         prices = body.get("prices", {})
         if prices:
             process_tick(prices)
-        return JSONResponse({"status": "ok"})
+        with state_lock:
+            return JSONResponse(state)
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)}, status_code=400)
