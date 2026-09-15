@@ -19,7 +19,11 @@ const PAIR_MAP = {
 let charts = {};
 let isRunning = true;
 let livePrices = {};
+let priceHistories = {
+  BTC: [], ETH: [], SOL: [], CORE: [], MNT: [], XAUT: []
+};
 
+// 1. Initialize Chart.js safely
 function initCharts() {
   Object.keys(ASSET_CONFIG).forEach(coin => {
     const canvas = document.getElementById(`chart-${coin.toLowerCase()}`);
@@ -31,25 +35,24 @@ function initCharts() {
     charts[coin] = new Chart(ctx, {
       type: "line",
       data: {
-        labels: Array(30).fill(""),
+        labels: [],
         datasets: [{
           data: [],
           borderColor: color,
-          backgroundColor: color.replace(")", ", 0.08)").replace("rgb", "rgba").replace("#", "rgba(") + (color.startsWith("#") ? "14" : ""),
+          backgroundColor: "transparent",
           borderWidth: 2,
           pointRadius: 0,
-          pointHoverRadius: 3,
           tension: 0.25,
-          fill: true
+          fill: false
         }]
       },
       options: {
         responsive: true,
         maintainAspectRatio: false,
-        animation: { duration: 200 },
+        animation: false,
         plugins: {
           legend: { display: false },
-          tooltip: { enabled: true, mode: "index", intersect: false }
+          tooltip: { enabled: false }
         },
         scales: {
           x: { display: false },
@@ -59,7 +62,7 @@ function initCharts() {
             ticks: {
               color: "#94a3b8",
               font: { size: 10 },
-              maxTicksLimit: 5
+              maxTicksLimit: 4
             }
           }
         }
@@ -68,13 +71,19 @@ function initCharts() {
   });
 }
 
-function updateChartData(coin, history) {
-  if (!charts[coin] || !history || history.length === 0) return;
-  charts[coin].data.labels = history.map(() => "");
-  charts[coin].data.datasets[0].data = history;
-  charts[coin].update();
+function pushChartPoint(coin, price) {
+  if (!priceHistories[coin]) priceHistories[coin] = [];
+  priceHistories[coin].push(price);
+  if (priceHistories[coin].length > 30) priceHistories[coin].shift();
+
+  if (charts[coin]) {
+    charts[coin].data.labels = priceHistories[coin].map(() => "");
+    charts[coin].data.datasets[0].data = priceHistories[coin];
+    charts[coin].update("none");
+  }
 }
 
+// 2. Render Trade Log Table
 function renderTradeLog(tradeLog) {
   const tbody = document.getElementById("trade-log");
   if (!tbody || !tradeLog) return;
@@ -116,63 +125,46 @@ function renderTradeLog(tradeLog) {
   tbody.innerHTML = rowsHtml;
 }
 
-function setCardPrice(coin, price) {
-  // Try direct card query selectors
-  const el = document.getElementById(`price-${coin.toLowerCase()}`);
-  if (el) {
-    const decimals = ASSET_CONFIG[coin]?.decimals || 2;
-    el.innerText = `$${Number(price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: decimals })}`;
-  } else {
-    // Fallback: search by container text
-    const cards = document.querySelectorAll('.card, .asset-card, div');
-    cards.forEach(card => {
-      const title = card.querySelector('h3, h4, .asset-name, .symbol');
-      if (title && title.innerText.includes(coin)) {
-        const val = card.querySelector('.price, .value, [id*="price"]');
-        if (val) {
-          val.innerText = `$${Number(price).toFixed(2)}`;
-        }
-      }
-    });
-  }
-}
-
+// 3. Update Balance, Holdings & Trade Log from Backend
 function updateUI(state) {
+  if (!state) return;
+
   const totalPort = document.getElementById("total-portfolio");
   const availCash = document.getElementById("available-cash");
   const totalPnl = document.getElementById("total-pnl");
 
-  if (totalPort) totalPort.innerText = `$${Number(state.totalPortfolio).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
-  if (availCash) availCash.innerText = `$${Number(state.cash).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
+  if (totalPort) totalPort.innerText = `$${Number(state.totalPortfolio || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
+  if (availCash) availCash.innerText = `$${Number(state.cash || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
 
   if (totalPnl) {
-    const isNetProfit = Number(state.pnl) >= 0;
-    const sign = isNetProfit ? "+" : "";
-    totalPnl.innerText = `${sign}$${Number(state.pnl).toFixed(2)} (${sign}${Number(state.pnlPercent).toFixed(2)}%)`;
-    totalPnl.className = isNetProfit ? "metric-value profit" : "metric-value loss";
+    const pnl = Number(state.pnl || 0);
+    const pnlPct = Number(state.pnlPercent || 0);
+    const isProfit = pnl >= 0;
+    const sign = isProfit ? "+" : "";
+    totalPnl.innerText = `${sign}$${pnl.toFixed(2)} (${sign}${pnlPct.toFixed(2)}%)`;
+    totalPnl.className = isProfit ? "metric-value profit" : "metric-value loss";
   }
 
   if (state.assets) {
     Object.keys(state.assets).forEach(coin => {
-      const assetData = state.assets[coin];
-      const lowerCoin = coin.toLowerCase();
-
-      const holdElem = document.getElementById(`hold-${lowerCoin}`);
+      const asset = state.assets[coin];
+      const lower = coin.toLowerCase();
       const decimals = ASSET_CONFIG[coin]?.decimals || 2;
-      const currentPrice = Number(assetData.price || livePrices[coin] || 0);
+      const orders = asset.orders || [];
+      const totalQty = orders.reduce((sum, o) => sum + Number(o.qty || 0), 0);
 
-      if (currentPrice > 0) {
-        setCardPrice(coin, currentPrice);
-      }
-
+      // Updates "Holding: 0.0000 BTC (0/3)"
+      const holdElem = document.getElementById(`hold-${lower}`) || document.getElementById(`holding-${lower}`);
       if (holdElem) {
-        const totalQty = (assetData.orders || []).reduce((acc, o) => acc + Number(o.qty || 0), 0);
-        const orderCount = assetData.orders ? assetData.orders.length : 0;
-        holdElem.innerText = `Holding: ${totalQty.toFixed(decimals)} ${coin} (${orderCount}/3)`;
+        holdElem.innerText = `Holding: ${Number(totalQty).toFixed(decimals)} ${coin} (${orders.length}/3)`;
       }
 
-      if (assetData.history) {
-        updateChartData(coin, assetData.history);
+      // Safe fallback: only write price to DOM if WebSocket hasn't already set it
+      if (!livePrices[coin] && asset.price > 0) {
+        const priceElem = document.getElementById(`price-${lower}`);
+        if (priceElem) {
+          priceElem.innerText = `$${Number(asset.price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: decimals })}`;
+        }
       }
     });
   }
@@ -180,7 +172,7 @@ function updateUI(state) {
   renderTradeLog(state.trade_log);
 }
 
-// Connect directly to Bybit Spot WebSocket
+// 4. WebSocket Feed: Direct bybit stream + instant DOM updates
 function connectBybitWebSocket() {
   const wsUrl = "wss://stream.bybit.com/v5/public/spot";
   const ws = new WebSocket(wsUrl);
@@ -189,14 +181,14 @@ function connectBybitWebSocket() {
   ws.onopen = () => {
     console.log("Connected to Bybit Spot WebSocket");
     
-    // Subscribe individually to guarantee immediate snapshot from Bybit
-    Object.keys(PAIR_MAP).forEach(pair => {
-      ws.send(JSON.stringify({
-        op: "subscribe",
-        args: [`tickers.${pair}`]
-      }));
-    });
+    // Subscribe to all 6 pairs
+    const subMsg = {
+      op: "subscribe",
+      args: Object.keys(PAIR_MAP).map(pair => `tickers.${pair}`)
+    };
+    ws.send(JSON.stringify(subMsg));
 
+    // Required 20s heartbeat
     pingInterval = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ op: "ping" }));
@@ -206,13 +198,13 @@ function connectBybitWebSocket() {
 
   ws.onmessage = (event) => {
     try {
-      const msg = JSON.parse(event.data);
-      if (msg.op === "pong" || msg.ret_msg === "pong") return;
+      const data = JSON.parse(event.data);
+      if (data.op === "pong" || data.ret_msg === "pong") return;
 
-      if (msg.topic && msg.topic.startsWith("tickers.") && msg.data) {
-        const payload = msg.data;
-        const symbol = payload.symbol || msg.topic.split(".")[1];
-        const rawPrice = payload.lastPrice;
+      if (data.topic && data.topic.startsWith("tickers.") && data.data) {
+        const item = Array.isArray(data.data) ? data.data[0] : data.data;
+        const symbol = item.symbol || data.topic.replace("tickers.", "");
+        const rawPrice = item.lastPrice || item.lp || item.close;
 
         if (rawPrice) {
           const price = parseFloat(rawPrice);
@@ -220,7 +212,16 @@ function connectBybitWebSocket() {
 
           if (coin && !isNaN(price) && price > 0) {
             livePrices[coin] = price;
-            setCardPrice(coin, price);
+
+            // Direct ID targeting that worked
+            const priceElem = document.getElementById(`price-${coin.toLowerCase()}`);
+            const decimals = ASSET_CONFIG[coin]?.decimals || 2;
+            if (priceElem) {
+              priceElem.innerText = `$${price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: decimals })}`;
+            }
+
+            // Stream into chart
+            pushChartPoint(coin, price);
           }
         }
       }
@@ -235,12 +236,12 @@ function connectBybitWebSocket() {
 
   ws.onclose = () => {
     clearInterval(pingInterval);
-    console.warn("WebSocket disconnected. Reconnecting in 3s...");
+    console.warn("Bybit WebSocket closed. Reconnecting in 3 seconds...");
     setTimeout(connectBybitWebSocket, 3000);
   };
 }
 
-// Push live Bybit ticks to Python backend
+// 5. Send prices to Python bot & fetch state
 async function syncWithServer() {
   if (!isRunning || Object.keys(livePrices).length === 0) return;
 
@@ -253,8 +254,10 @@ async function syncWithServer() {
 
     if (tickRes.ok) {
       const res = await fetch("/state");
-      const state = await res.json();
-      updateUI(state);
+      if (res.ok) {
+        const state = await res.json();
+        updateUI(state);
+      }
     }
   } catch (err) {
     console.warn("Sync error:", err);
@@ -264,7 +267,7 @@ async function syncWithServer() {
 document.addEventListener("DOMContentLoaded", () => {
   initCharts();
   connectBybitWebSocket();
-  setInterval(syncWithServer, 3000);
+  setInterval(syncWithServer, 2500);
 
   const pauseBtn = document.getElementById("pause-btn");
   if (pauseBtn) {
