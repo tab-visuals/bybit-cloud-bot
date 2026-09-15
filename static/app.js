@@ -193,28 +193,29 @@ function connectBybitWebSocket() {
   ws.onclose = () => setTimeout(connectBybitWebSocket, 3000);
 }
 
-// 4. Sync loop
+// 4. Combined Sync Loop (Single HTTP request prevents ERR_SSL_BAD_RECORD_MAC_ALERT)
 async function syncWithServer() {
   if (!isRunning || Object.keys(livePrices).length === 0) return;
   try {
-    const tickRes = await fetch("/tick", {
+    const res = await fetch("/tick", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prices: livePrices })
     });
-    if (tickRes.ok) {
-      const res = await fetch("/state");
-      if (res.ok) updateUI(await res.json());
+    if (res.ok) {
+      const state = await res.json();
+      updateUI(state);
     }
   } catch (err) {
-    console.warn("Sync error:", err);
+    console.warn("Sync warning (packet retry):", err);
   }
 }
 
 document.addEventListener("DOMContentLoaded", () => {
   initCharts();
   connectBybitWebSocket();
-  setInterval(syncWithServer, 2000);
+  // 3-second cycle balances latency and connection stability
+  setInterval(syncWithServer, 3000);
 
   // Button logic (Matches id="toggle-btn" and "status-pill")
   const pauseBtn = document.getElementById("toggle-btn");
