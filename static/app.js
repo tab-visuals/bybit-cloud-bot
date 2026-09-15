@@ -116,11 +116,24 @@ function renderTradeLog(tradeLog) {
   tbody.innerHTML = rowsHtml;
 }
 
-function setPriceInDOM(coin, price) {
-  const priceElem = document.getElementById(`price-${coin.toLowerCase()}`);
-  const decimals = ASSET_CONFIG[coin]?.decimals || 2;
-  if (priceElem) {
-    priceElem.innerText = `$${Number(price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: decimals })}`;
+function setCardPrice(coin, price) {
+  // Try direct card query selectors
+  const el = document.getElementById(`price-${coin.toLowerCase()}`);
+  if (el) {
+    const decimals = ASSET_CONFIG[coin]?.decimals || 2;
+    el.innerText = `$${Number(price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: decimals })}`;
+  } else {
+    // Fallback: search by container text
+    const cards = document.querySelectorAll('.card, .asset-card, div');
+    cards.forEach(card => {
+      const title = card.querySelector('h3, h4, .asset-name, .symbol');
+      if (title && title.innerText.includes(coin)) {
+        const val = card.querySelector('.price, .value, [id*="price"]');
+        if (val) {
+          val.innerText = `$${Number(price).toFixed(2)}`;
+        }
+      }
+    });
   }
 }
 
@@ -149,7 +162,7 @@ function updateUI(state) {
       const currentPrice = Number(assetData.price || livePrices[coin] || 0);
 
       if (currentPrice > 0) {
-        setPriceInDOM(coin, currentPrice);
+        setCardPrice(coin, currentPrice);
       }
 
       if (holdElem) {
@@ -167,26 +180,6 @@ function updateUI(state) {
   renderTradeLog(state.trade_log);
 }
 
-// Initial bootstrap to get immediate prices before socket events
-async function fetchBootstrapPrices() {
-  try {
-    const res = await fetch("https://api.bybit.com/v5/market/tickers?category=spot");
-    if (!res.ok) return;
-    const json = await res.json();
-    const list = json?.result?.list || [];
-    list.forEach(item => {
-      const coin = PAIR_MAP[item.symbol];
-      if (coin && item.lastPrice) {
-        const p = parseFloat(item.lastPrice);
-        livePrices[coin] = p;
-        setPriceInDOM(coin, p);
-      }
-    });
-  } catch (_) {
-    // If CORS prevents the REST fetch, WebSocket remains the live pipeline
-  }
-}
-
 // Connect directly to Bybit Spot WebSocket
 function connectBybitWebSocket() {
   const wsUrl = "wss://stream.bybit.com/v5/public/spot";
@@ -196,11 +189,14 @@ function connectBybitWebSocket() {
   ws.onopen = () => {
     console.log("Connected to Bybit Spot WebSocket");
     
-    // Subscribe to all spot ticker pairs in a single message
-    const args = Object.keys(PAIR_MAP).map(pair => `tickers.${pair}`);
-    ws.send(JSON.stringify({ op: "subscribe", args: args }));
+    // Subscribe individually to guarantee immediate snapshot from Bybit
+    Object.keys(PAIR_MAP).forEach(pair => {
+      ws.send(JSON.stringify({
+        op: "subscribe",
+        args: [`tickers.${pair}`]
+      }));
+    });
 
-    // Heartbeat ping every 20 seconds
     pingInterval = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ op: "ping" }));
@@ -210,13 +206,13 @@ function connectBybitWebSocket() {
 
   ws.onmessage = (event) => {
     try {
-      const data = JSON.parse(event.data);
-      if (data.op === "pong" || data.ret_msg === "pong") return;
+      const msg = JSON.parse(event.data);
+      if (msg.op === "pong" || msg.ret_msg === "pong") return;
 
-      if (data.topic && data.topic.startsWith("tickers.") && data.data) {
-        const item = Array.isArray(data.data) ? data.data[0] : data.data;
-        const symbol = item.symbol || data.topic.split(".")[1];
-        const rawPrice = item.lastPrice || item.lp || item.close;
+      if (msg.topic && msg.topic.startsWith("tickers.") && msg.data) {
+        const payload = msg.data;
+        const symbol = payload.symbol || msg.topic.split(".")[1];
+        const rawPrice = payload.lastPrice;
 
         if (rawPrice) {
           const price = parseFloat(rawPrice);
@@ -224,7 +220,7 @@ function connectBybitWebSocket() {
 
           if (coin && !isNaN(price) && price > 0) {
             livePrices[coin] = price;
-            setPriceInDOM(coin, price);
+            setCardPrice(coin, price);
           }
         }
       }
@@ -239,7 +235,7 @@ function connectBybitWebSocket() {
 
   ws.onclose = () => {
     clearInterval(pingInterval);
-    console.warn("Bybit WebSocket closed. Reconnecting in 3 seconds...");
+    console.warn("WebSocket disconnected. Reconnecting in 3s...");
     setTimeout(connectBybitWebSocket, 3000);
   };
 }
@@ -267,7 +263,6 @@ async function syncWithServer() {
 
 document.addEventListener("DOMContentLoaded", () => {
   initCharts();
-  fetchBootstrapPrices();
   connectBybitWebSocket();
   setInterval(syncWithServer, 3000);
 
