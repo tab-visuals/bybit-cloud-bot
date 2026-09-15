@@ -111,8 +111,15 @@ body {
   color: #ffffff;
 }
 
-.metric-value.profit {
-  color: #10b981;
+/* Dynamic Profit / Loss text states */
+.metric-value.profit,
+.profit {
+  color: #10b981 !important;
+}
+
+.metric-value.loss,
+.loss {
+  color: #ef4444 !important;
 }
 
 .assets-grid {
@@ -220,9 +227,15 @@ tbody tr:hover {
 .buy-tag {
   color: #10b981;
   font-weight: 700;
+  background: rgba(16, 185, 129, 0.1);
+  padding: 2px 8px;
+  border-radius: 4px;
 }
 
 .sell-tag {
   color: #ef4444;
   font-weight: 700;
+  background: rgba(239, 68, 68, 0.1);
+  padding: 2px 8px;
+  border-radius: 4px;
 }
