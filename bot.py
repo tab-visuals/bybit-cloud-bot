@@ -1,11 +1,12 @@
 import os
 import json
 import time
+import random
 import threading
 from datetime import datetime
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 app = FastAPI(title="Bybit Scalper Relay")
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -114,10 +115,9 @@ def process_tick(prices: dict):
 
             # 2. EVALUATE ENTRIES
             cooldown = (current_time - coin_data.get("lastExitTime", 0)) < (COOLDOWN_SECONDS * 1000)
-            if not cooldown and len(coin_data["orders"]) < MAX_ORDERS_PER_COIN and state["cash"] >= 100.0:
+            if not cooldown and len(coin_data["orders"]) < MAX_ORDERS_PER_COIN and state["cash"] >= 200.0:
                 time_since_buy = (current_time - coin_data.get("lastBuyTime", 0))
                 should_buy = False
-                entry_size = 500.0
 
                 if len(coin_data["orders"]) == 0:
                     if sma is not None and curr_price < sma:
@@ -127,7 +127,14 @@ def process_tick(prices: dict):
                     if curr_price < (last_entry * (1.0 - DIP_THRESHOLD_PCT)):
                         should_buy = True
 
-                if should_buy and state["cash"] >= entry_size:
+                if should_buy:
+                    # Random integer between 200 and 600, capped by available cash
+                    max_affordable = min(600, int(state["cash"]))
+                    if max_affordable >= 200:
+                        entry_size = float(random.randint(200, max_affordable))
+                    else:
+                        entry_size = float(int(state["cash"]))
+
                     fee = entry_size * BYBIT_FEE_RATE
                     usable = entry_size - fee
                     qty = usable / curr_price
@@ -158,6 +165,10 @@ def startup_event():
 @app.get("/")
 def read_root():
     return FileResponse("static/index.html")
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return Response(status_code=204)
 
 @app.get("/state")
 def get_state():
