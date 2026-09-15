@@ -23,7 +23,7 @@ let priceHistories = {
   BTC: [], ETH: [], SOL: [], CORE: [], MNT: [], XAUT: []
 };
 
-// Initialize Chart.js instances
+// 1. Initialize Chart.js safely
 function initCharts() {
   Object.keys(ASSET_CONFIG).forEach(coin => {
     const canvas = document.getElementById(`chart-${coin.toLowerCase()}`);
@@ -39,30 +39,23 @@ function initCharts() {
         datasets: [{
           data: [],
           borderColor: color,
+          backgroundColor: "transparent",
           borderWidth: 2,
           pointRadius: 0,
-          tension: 0.25,
-          fill: false
+          tension: 0.2
         }]
       },
       options: {
         responsive: true,
         maintainAspectRatio: false,
         animation: false,
-        plugins: {
-          legend: { display: false },
-          tooltip: { enabled: false }
-        },
+        plugins: { legend: { display: false } },
         scales: {
           x: { display: false },
           y: {
             display: true,
-            grid: { color: "rgba(255, 255, 255, 0.05)", drawBorder: false },
-            ticks: {
-              color: "#94a3b8",
-              font: { size: 10 },
-              maxTicksLimit: 4
-            }
+            grid: { color: "rgba(255, 255, 255, 0.05)" },
+            ticks: { color: "#94a3b8", font: { size: 10 }, maxTicksLimit: 4 }
           }
         }
       }
@@ -70,10 +63,10 @@ function initCharts() {
   });
 }
 
-function pushPriceToChart(coin, price) {
+function pushChartPrice(coin, price) {
   if (!priceHistories[coin]) priceHistories[coin] = [];
   priceHistories[coin].push(price);
-  if (priceHistories[coin].length > 25) priceHistories[coin].shift();
+  if (priceHistories[coin].length > 30) priceHistories[coin].shift();
 
   if (charts[coin]) {
     charts[coin].data.labels = priceHistories[coin].map(() => "");
@@ -82,15 +75,7 @@ function pushPriceToChart(coin, price) {
   }
 }
 
-function updateHoldingDOM(coin, qty, ordersCount, decimals) {
-  const lower = coin.toLowerCase();
-  // Target both standard naming conventions
-  const el = document.getElementById(`hold-${lower}`) || document.getElementById(`holding-${lower}`);
-  if (el) {
-    el.innerText = `Holding: ${Number(qty).toFixed(decimals)} ${coin} (${ordersCount}/3)`;
-  }
-}
-
+// 2. Render Trade History
 function renderTradeLog(tradeLog) {
   const tbody = document.getElementById("trade-log");
   if (!tbody || !tradeLog) return;
@@ -132,6 +117,7 @@ function renderTradeLog(tradeLog) {
   tbody.innerHTML = rowsHtml;
 }
 
+// 3. Update Balance, Holdings & Trade Log from Python backend
 function updateUI(state) {
   if (!state) return;
 
@@ -154,19 +140,15 @@ function updateUI(state) {
   if (state.assets) {
     Object.keys(state.assets).forEach(coin => {
       const asset = state.assets[coin];
+      const lowerCoin = coin.toLowerCase();
       const decimals = ASSET_CONFIG[coin]?.decimals || 2;
       const orders = asset.orders || [];
       const totalQty = orders.reduce((sum, o) => sum + Number(o.qty || 0), 0);
-      
-      updateHoldingDOM(coin, totalQty, orders.length, decimals);
 
-      if (asset.history && asset.history.length > 0 && priceHistories[coin].length === 0) {
-        priceHistories[coin] = [...asset.history];
-        if (charts[coin]) {
-          charts[coin].data.labels = priceHistories[coin].map(() => "");
-          charts[coin].data.datasets[0].data = priceHistories[coin];
-          charts[coin].update("none");
-        }
+      // Update Holdings Line
+      const holdElem = document.getElementById(`holding-${lowerCoin}`) || document.getElementById(`hold-${lowerCoin}`);
+      if (holdElem) {
+        holdElem.innerText = `Holding: ${Number(totalQty).toFixed(decimals)} ${coin} (${orders.length}/3)`;
       }
     });
   }
@@ -174,7 +156,7 @@ function updateUI(state) {
   renderTradeLog(state.trade_log);
 }
 
-// Connect directly to Bybit Spot WebSocket
+// 4. WebSocket Feed: Exactly what worked before + direct DOM updates
 function connectBybitWebSocket() {
   const wsUrl = "wss://stream.bybit.com/v5/public/spot";
   const ws = new WebSocket(wsUrl);
@@ -182,7 +164,8 @@ function connectBybitWebSocket() {
 
   ws.onopen = () => {
     console.log("Connected to Bybit Spot WebSocket");
-    
+
+    // Subscribe to each ticker individually (proven to fire instant snapshots)
     Object.keys(PAIR_MAP).forEach(pair => {
       ws.send(JSON.stringify({
         op: "subscribe",
@@ -204,7 +187,7 @@ function connectBybitWebSocket() {
 
       if (msg.topic && msg.topic.startsWith("tickers.") && msg.data) {
         const payload = msg.data;
-        const symbol = payload.symbol || msg.topic.split(".")[1];
+        const symbol = payload.symbol || msg.topic.replace("tickers.", "");
         const rawPrice = payload.lastPrice;
 
         if (rawPrice) {
@@ -214,15 +197,15 @@ function connectBybitWebSocket() {
           if (coin && !isNaN(price) && price > 0) {
             livePrices[coin] = price;
 
-            // 1. Update Price Card
-            const el = document.getElementById(`price-${coin.toLowerCase()}`);
-            if (el) {
-              const decimals = ASSET_CONFIG[coin]?.decimals || 2;
-              el.innerText = `$${price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: decimals })}`;
+            // Restored working element target
+            const priceElem = document.getElementById(`price-${coin.toLowerCase()}`);
+            const decimals = ASSET_CONFIG[coin]?.decimals || 2;
+            if (priceElem) {
+              priceElem.innerText = `$${price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: decimals })}`;
             }
 
-            // 2. Stream into Live Chart
-            pushPriceToChart(coin, price);
+            // Stream point to chart
+            pushChartPrice(coin, price);
           }
         }
       }
@@ -242,7 +225,7 @@ function connectBybitWebSocket() {
   };
 }
 
-// Push live Bybit ticks to Python backend and retrieve updated state
+// 5. Send prices to Python bot and refresh server stats
 async function syncWithServer() {
   if (!isRunning || Object.keys(livePrices).length === 0) return;
 
