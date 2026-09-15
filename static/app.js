@@ -1,3 +1,4 @@
+// Asset visual theme configuration
 const ASSET_CONFIG = {
   BTC: { name: "Bitcoin", color: "#10b981", decimals: 2 },
   ETH: { name: "Ethereum", color: "#6366f1", decimals: 2 },
@@ -19,11 +20,8 @@ const PAIR_MAP = {
 let charts = {};
 let isRunning = true;
 let livePrices = {};
-let priceHistories = {
-  BTC: [], ETH: [], SOL: [], CORE: [], MNT: [], XAUT: []
-};
 
-// 1. Initialize Chart.js safely
+// Initialize Chart.js instances with custom neon borders
 function initCharts() {
   Object.keys(ASSET_CONFIG).forEach(coin => {
     const canvas = document.getElementById(`chart-${coin.toLowerCase()}`);
@@ -35,27 +33,36 @@ function initCharts() {
     charts[coin] = new Chart(ctx, {
       type: "line",
       data: {
-        labels: [],
+        labels: Array(30).fill(""),
         datasets: [{
           data: [],
           borderColor: color,
-          backgroundColor: "transparent",
+          backgroundColor: color.replace(")", ", 0.08)").replace("rgb", "rgba").replace("#", "rgba(") + (color.startsWith("#") ? "14" : ""),
           borderWidth: 2,
           pointRadius: 0,
-          tension: 0.2
+          pointHoverRadius: 3,
+          tension: 0.25,
+          fill: true
         }]
       },
       options: {
         responsive: true,
         maintainAspectRatio: false,
-        animation: false,
-        plugins: { legend: { display: false } },
+        animation: { duration: 250 },
+        plugins: {
+          legend: { display: false },
+          tooltip: { enabled: true, mode: "index", intersect: false }
+        },
         scales: {
           x: { display: false },
           y: {
             display: true,
-            grid: { color: "rgba(255, 255, 255, 0.05)" },
-            ticks: { color: "#94a3b8", font: { size: 10 }, maxTicksLimit: 4 }
+            grid: { color: "rgba(255, 255, 255, 0.05)", drawBorder: false },
+            ticks: {
+              color: "#94a3b8",
+              font: { size: 10 },
+              maxTicksLimit: 5
+            }
           }
         }
       }
@@ -63,19 +70,13 @@ function initCharts() {
   });
 }
 
-function pushChartPrice(coin, price) {
-  if (!priceHistories[coin]) priceHistories[coin] = [];
-  priceHistories[coin].push(price);
-  if (priceHistories[coin].length > 30) priceHistories[coin].shift();
-
-  if (charts[coin]) {
-    charts[coin].data.labels = priceHistories[coin].map(() => "");
-    charts[coin].data.datasets[0].data = priceHistories[coin];
-    charts[coin].update("none");
-  }
+function updateChartData(coin, history) {
+  if (!charts[coin] || !history || history.length === 0) return;
+  charts[coin].data.labels = history.map(() => "");
+  charts[coin].data.datasets[0].data = history;
+  charts[coin].update();
 }
 
-// 2. Render Trade History
 function renderTradeLog(tradeLog) {
   const tbody = document.getElementById("trade-log");
   if (!tbody || !tradeLog) return;
@@ -117,38 +118,44 @@ function renderTradeLog(tradeLog) {
   tbody.innerHTML = rowsHtml;
 }
 
-// 3. Update Balance, Holdings & Trade Log from Python backend
 function updateUI(state) {
-  if (!state) return;
-
   const totalPort = document.getElementById("total-portfolio");
   const availCash = document.getElementById("available-cash");
   const totalPnl = document.getElementById("total-pnl");
 
-  if (totalPort) totalPort.innerText = `$${Number(state.totalPortfolio || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
-  if (availCash) availCash.innerText = `$${Number(state.cash || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
+  if (totalPort) totalPort.innerText = `$${Number(state.totalPortfolio).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
+  if (availCash) availCash.innerText = `$${Number(state.cash).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
 
   if (totalPnl) {
-    const pnl = Number(state.pnl || 0);
-    const pnlPct = Number(state.pnlPercent || 0);
-    const isProfit = pnl >= 0;
-    const sign = isProfit ? "+" : "";
-    totalPnl.innerText = `${sign}$${pnl.toFixed(2)} (${sign}${pnlPct.toFixed(2)}%)`;
-    totalPnl.className = isProfit ? "metric-value profit" : "metric-value loss";
+    const isNetProfit = Number(state.pnl) >= 0;
+    const sign = isNetProfit ? "+" : "";
+    totalPnl.innerText = `${sign}$${Number(state.pnl).toFixed(2)} (${sign}${Number(state.pnlPercent).toFixed(2)}%)`;
+    totalPnl.className = isNetProfit ? "metric-value profit" : "metric-value loss";
   }
 
   if (state.assets) {
     Object.keys(state.assets).forEach(coin => {
-      const asset = state.assets[coin];
+      const assetData = state.assets[coin];
       const lowerCoin = coin.toLowerCase();
-      const decimals = ASSET_CONFIG[coin]?.decimals || 2;
-      const orders = asset.orders || [];
-      const totalQty = orders.reduce((sum, o) => sum + Number(o.qty || 0), 0);
 
-      // Update Holdings Line
-      const holdElem = document.getElementById(`holding-${lowerCoin}`) || document.getElementById(`hold-${lowerCoin}`);
+      const priceElem = document.getElementById(`price-${lowerCoin}`);
+      const holdElem = document.getElementById(`hold-${lowerCoin}`);
+
+      const decimals = ASSET_CONFIG[coin]?.decimals || 2;
+      const currentPrice = Number(assetData.price || livePrices[coin] || 0);
+
+      if (priceElem && currentPrice > 0) {
+        priceElem.innerText = `$${currentPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: decimals })}`;
+      }
+
       if (holdElem) {
-        holdElem.innerText = `Holding: ${Number(totalQty).toFixed(decimals)} ${coin} (${orders.length}/3)`;
+        const totalQty = (assetData.orders || []).reduce((acc, o) => acc + Number(o.qty || 0), 0);
+        const orderCount = assetData.orders ? assetData.orders.length : 0;
+        holdElem.innerText = `Holding: ${totalQty.toFixed(decimals)} ${coin} (${orderCount}/3)`;
+      }
+
+      if (assetData.history) {
+        updateChartData(coin, assetData.history);
       }
     });
   }
@@ -156,7 +163,7 @@ function updateUI(state) {
   renderTradeLog(state.trade_log);
 }
 
-// 4. WebSocket Feed: Exactly what worked before + direct DOM updates
+// Connect directly to Bybit V5 Native WebSocket Feed
 function connectBybitWebSocket() {
   const wsUrl = "wss://stream.bybit.com/v5/public/spot";
   const ws = new WebSocket(wsUrl);
@@ -164,15 +171,15 @@ function connectBybitWebSocket() {
 
   ws.onopen = () => {
     console.log("Connected to Bybit Spot WebSocket");
+    
+    // Subscribe to all 6 spot pairs
+    const subMsg = {
+      op: "subscribe",
+      args: Object.keys(PAIR_MAP).map(pair => `tickers.${pair}`)
+    };
+    ws.send(JSON.stringify(subMsg));
 
-    // Subscribe to each ticker individually (proven to fire instant snapshots)
-    Object.keys(PAIR_MAP).forEach(pair => {
-      ws.send(JSON.stringify({
-        op: "subscribe",
-        args: [`tickers.${pair}`]
-      }));
-    });
-
+    // Keep connection alive with Bybit required heartbeat ping
     pingInterval = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ op: "ping" }));
@@ -182,30 +189,24 @@ function connectBybitWebSocket() {
 
   ws.onmessage = (event) => {
     try {
-      const msg = JSON.parse(event.data);
-      if (msg.op === "pong" || msg.ret_msg === "pong") return;
+      const data = JSON.parse(event.data);
+      
+      // Handle ticker payload (supports snapshot and delta formats)
+      if (data.topic && data.topic.startsWith("tickers.") && data.data) {
+        const item = Array.isArray(data.data) ? data.data[0] : data.data;
+        const symbol = item.symbol || data.topic.replace("tickers.", "");
+        const rawPrice = item.lastPrice || item.lp || item.close;
+        const price = parseFloat(rawPrice);
+        const coin = PAIR_MAP[symbol];
 
-      if (msg.topic && msg.topic.startsWith("tickers.") && msg.data) {
-        const payload = msg.data;
-        const symbol = payload.symbol || msg.topic.replace("tickers.", "");
-        const rawPrice = payload.lastPrice;
+        if (coin && !isNaN(price) && price > 0) {
+          livePrices[coin] = price;
 
-        if (rawPrice) {
-          const price = parseFloat(rawPrice);
-          const coin = PAIR_MAP[symbol];
-
-          if (coin && !isNaN(price) && price > 0) {
-            livePrices[coin] = price;
-
-            // Restored working element target
-            const priceElem = document.getElementById(`price-${coin.toLowerCase()}`);
-            const decimals = ASSET_CONFIG[coin]?.decimals || 2;
-            if (priceElem) {
-              priceElem.innerText = `$${price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: decimals })}`;
-            }
-
-            // Stream point to chart
-            pushChartPrice(coin, price);
+          // Update card price immediately in DOM
+          const priceElem = document.getElementById(`price-${coin.toLowerCase()}`);
+          const decimals = ASSET_CONFIG[coin]?.decimals || 2;
+          if (priceElem) {
+            priceElem.innerText = `$${price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: decimals })}`;
           }
         }
       }
@@ -220,12 +221,12 @@ function connectBybitWebSocket() {
 
   ws.onclose = () => {
     clearInterval(pingInterval);
-    console.warn("WebSocket disconnected. Reconnecting in 3s...");
+    console.warn("Bybit WebSocket closed. Reconnecting in 3 seconds...");
     setTimeout(connectBybitWebSocket, 3000);
   };
 }
 
-// 5. Send prices to Python bot and refresh server stats
+// Push latest live Bybit ticks to Python backend
 async function syncWithServer() {
   if (!isRunning || Object.keys(livePrices).length === 0) return;
 
@@ -238,10 +239,8 @@ async function syncWithServer() {
 
     if (tickRes.ok) {
       const res = await fetch("/state");
-      if (res.ok) {
-        const data = await res.json();
-        updateUI(data);
-      }
+      const state = await res.json();
+      updateUI(state);
     }
   } catch (err) {
     console.warn("Sync error:", err);
@@ -251,7 +250,7 @@ async function syncWithServer() {
 document.addEventListener("DOMContentLoaded", () => {
   initCharts();
   connectBybitWebSocket();
-  setInterval(syncWithServer, 2000);
+  setInterval(syncWithServer, 3000);
 
   const pauseBtn = document.getElementById("pause-btn");
   if (pauseBtn) {
