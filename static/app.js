@@ -16,96 +16,178 @@ const PAIR_MAP = {
   "XAUTUSDT": "XAUT"
 };
 
+let charts = {};
 let isRunning = true;
 let livePrices = {};
 
-// Update the DOM cards directly
-function updateDOMPrice(coin, price) {
+function initCharts() {
+  Object.keys(ASSET_CONFIG).forEach(coin => {
+    const canvas = document.getElementById(`chart-${coin.toLowerCase()}`);
+    if (!canvas) return;
+
+    const ctx = canvas.getContext("2d");
+    const color = ASSET_CONFIG[coin].color;
+
+    charts[coin] = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels: Array(30).fill(""),
+        datasets: [{
+          data: [],
+          borderColor: color,
+          backgroundColor: color.replace(")", ", 0.08)").replace("rgb", "rgba").replace("#", "rgba(") + (color.startsWith("#") ? "14" : ""),
+          borderWidth: 2,
+          pointRadius: 0,
+          pointHoverRadius: 3,
+          tension: 0.25,
+          fill: true
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: { duration: 200 },
+        plugins: {
+          legend: { display: false },
+          tooltip: { enabled: true, mode: "index", intersect: false }
+        },
+        scales: {
+          x: { display: false },
+          y: {
+            display: true,
+            grid: { color: "rgba(255, 255, 255, 0.05)", drawBorder: false },
+            ticks: {
+              color: "#94a3b8",
+              font: { size: 10 },
+              maxTicksLimit: 5
+            }
+          }
+        }
+      }
+    });
+  });
+}
+
+function updateChartData(coin, history) {
+  if (!charts[coin] || !history || history.length === 0) return;
+  charts[coin].data.labels = history.map(() => "");
+  charts[coin].data.datasets[0].data = history;
+  charts[coin].update();
+}
+
+function renderTradeLog(tradeLog) {
+  const tbody = document.getElementById("trade-log");
+  if (!tbody || !tradeLog) return;
+
+  if (tradeLog.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; color: #64748b; padding: 20px;">Awaiting trade triggers...</td></tr>`;
+    return;
+  }
+
+  let rowsHtml = "";
+  tradeLog.forEach(trade => {
+    const isBuy = trade.type === "BUY";
+    const badgeClass = isBuy ? "buy-tag" : "sell-tag";
+
+    let pnlHtml = "-";
+    if (trade.pnl !== null && trade.pnl !== undefined) {
+      const isProfit = Number(trade.pnl) >= 0;
+      const sign = isProfit ? "+" : "";
+      const pnlClass = isProfit ? "profit" : "loss";
+      pnlHtml = `<span class="${pnlClass}">${sign}$${Number(trade.pnl).toFixed(2)}</span>`;
+    }
+
+    const priceDecimals = ASSET_CONFIG[trade.asset]?.decimals || 2;
+
+    rowsHtml += `
+      <tr>
+        <td>${trade.time}</td>
+        <td><span class="${badgeClass}">${trade.type}</span></td>
+        <td><strong>${trade.asset}</strong></td>
+        <td>$${Number(trade.price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: priceDecimals })}</td>
+        <td>${Number(trade.quantity).toFixed(priceDecimals)} ${trade.asset}</td>
+        <td><strong>$${Number(trade.totalValue).toFixed(2)}</strong></td>
+        <td>${pnlHtml}</td>
+        <td>${trade.note || ""}</td>
+      </tr>
+    `;
+  });
+
+  tbody.innerHTML = rowsHtml;
+}
+
+function setCardPrice(coin, price) {
   const el = document.getElementById(`price-${coin.toLowerCase()}`);
   if (el) {
-    const dec = ASSET_CONFIG[coin]?.decimals || 2;
-    el.innerText = `$${Number(price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: dec })}`;
+    const decimals = ASSET_CONFIG[coin]?.decimals || 2;
+    el.innerText = `$${Number(price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: decimals })}`;
+  } else {
+    const cards = document.querySelectorAll('.card, .asset-card, div');
+    cards.forEach(card => {
+      const title = card.querySelector('h3, h4, .asset-name, .symbol');
+      if (title && title.innerText.includes(coin)) {
+        const val = card.querySelector('.price, .value, [id*="price"]');
+        if (val) {
+          val.innerText = `$${Number(price).toFixed(2)}`;
+        }
+      }
+    });
   }
 }
 
-// Update balances, holdings, and trade logs
 function updateUI(state) {
-  if (!state) return;
-
   const totalPort = document.getElementById("total-portfolio");
   const availCash = document.getElementById("available-cash");
   const totalPnl = document.getElementById("total-pnl");
 
-  if (totalPort) totalPort.innerText = `$${Number(state.totalPortfolio || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
-  if (availCash) availCash.innerText = `$${Number(state.cash || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
+  if (totalPort) totalPort.innerText = `$${Number(state.totalPortfolio).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
+  if (availCash) availCash.innerText = `$${Number(state.cash).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
 
   if (totalPnl) {
-    const pnl = Number(state.pnl || 0);
-    const pnlPct = Number(state.pnlPercent || 0);
-    const isProfit = pnl >= 0;
-    const sign = isProfit ? "+" : "";
-    totalPnl.innerText = `${sign}$${pnl.toFixed(2)} (${sign}${pnlPct.toFixed(2)}%)`;
-    totalPnl.className = isProfit ? "metric-value profit" : "metric-value loss";
+    const isNetProfit = Number(state.pnl) >= 0;
+    const sign = isNetProfit ? "+" : "";
+    totalPnl.innerText = `${sign}$${Number(state.pnl).toFixed(2)} (${sign}${Number(state.pnlPercent).toFixed(2)}%)`;
+    totalPnl.className = isNetProfit ? "metric-value profit" : "metric-value loss";
   }
 
-  // Update Holdings lines (e.g. Holding: 0.0000 BTC (0/3))
   if (state.assets) {
     Object.keys(state.assets).forEach(coin => {
-      const asset = state.assets[coin];
-      const lower = coin.toLowerCase();
-      const dec = ASSET_CONFIG[coin]?.decimals || 2;
-      const orders = asset.orders || [];
-      const totalQty = orders.reduce((sum, o) => sum + Number(o.qty || 0), 0);
+      const assetData = state.assets[coin];
+      const lowerCoin = coin.toLowerCase();
 
-      const holdElem = document.getElementById(`holding-${lower}`) || document.getElementById(`hold-${lower}`);
+      const holdElem = document.getElementById(`hold-${lowerCoin}`);
+      const decimals = ASSET_CONFIG[coin]?.decimals || 2;
+      const currentPrice = Number(assetData.price || livePrices[coin] || 0);
+
+      if (currentPrice > 0) {
+        setCardPrice(coin, currentPrice);
+      }
+
       if (holdElem) {
-        holdElem.innerText = `Holding: ${Number(totalQty).toFixed(dec)} ${coin} (${orders.length}/3)`;
+        const totalQty = (assetData.orders || []).reduce((acc, o) => acc + Number(o.qty || 0), 0);
+        const orderCount = assetData.orders ? assetData.orders.length : 0;
+        holdElem.innerText = `Holding: ${totalQty.toFixed(decimals)} ${coin} (${orderCount}/3)`;
+      }
+
+      if (assetData.history) {
+        updateChartData(coin, assetData.history);
       }
     });
   }
 
-  // Render Trade Log Table
-  const tbody = document.getElementById("trade-log");
-  if (tbody && state.trade_log) {
-    if (state.trade_log.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; color: #64748b; padding: 20px;">Awaiting trade triggers...</td></tr>`;
-    } else {
-      tbody.innerHTML = state.trade_log.map(trade => {
-        const isBuy = trade.type === "BUY";
-        const badgeClass = isBuy ? "buy-tag" : "sell-tag";
-        let pnlHtml = "-";
-        if (trade.pnl !== null && trade.pnl !== undefined) {
-          const isProfit = Number(trade.pnl) >= 0;
-          const sign = isProfit ? "+" : "";
-          pnlHtml = `<span class="${isProfit ? 'profit' : 'loss'}">${sign}$${Number(trade.pnl).toFixed(2)}</span>`;
-        }
-        const dec = ASSET_CONFIG[trade.asset]?.decimals || 2;
-        return `
-          <tr>
-            <td>${trade.time}</td>
-            <td><span class="${badgeClass}">${trade.type}</span></td>
-            <td><strong>${trade.asset}</strong></td>
-            <td>$${Number(trade.price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: dec })}</td>
-            <td>${Number(trade.quantity).toFixed(dec)} ${trade.asset}</td>
-            <td><strong>$${Number(trade.totalValue).toFixed(2)}</strong></td>
-            <td>${pnlHtml}</td>
-            <td>${trade.note || ""}</td>
-          </tr>
-        `;
-      }).join("");
-    }
-  }
+  renderTradeLog(state.trade_log);
 }
 
-// Connect directly to Bybit WebSocket
+// Connect directly to Bybit Spot WebSocket
 function connectBybitWebSocket() {
   const wsUrl = "wss://stream.bybit.com/v5/public/spot";
   const ws = new WebSocket(wsUrl);
+  let pingInterval;
 
   ws.onopen = () => {
     console.log("Connected to Bybit Spot WebSocket");
-
-    // Subscribe individually to guarantee immediate snapshots
+    
+    // Subscribe individually to guarantee immediate snapshot from Bybit
     Object.keys(PAIR_MAP).forEach(pair => {
       ws.send(JSON.stringify({
         op: "subscribe",
@@ -113,7 +195,7 @@ function connectBybitWebSocket() {
       }));
     });
 
-    setInterval(() => {
+    pingInterval = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ op: "ping" }));
       }
@@ -127,8 +209,8 @@ function connectBybitWebSocket() {
 
       if (msg.topic && msg.topic.startsWith("tickers.") && msg.data) {
         const payload = msg.data;
-        const symbol = payload.symbol || msg.topic.replace("tickers.", "");
-        const rawPrice = payload.lastPrice || payload.lp || payload.close;
+        const symbol = payload.symbol || msg.topic.split(".")[1];
+        const rawPrice = payload.lastPrice;
 
         if (rawPrice) {
           const price = parseFloat(rawPrice);
@@ -136,7 +218,7 @@ function connectBybitWebSocket() {
 
           if (coin && !isNaN(price) && price > 0) {
             livePrices[coin] = price;
-            updateDOMPrice(coin, price);
+            setCardPrice(coin, price);
           }
         }
       }
@@ -150,12 +232,13 @@ function connectBybitWebSocket() {
   };
 
   ws.onclose = () => {
+    clearInterval(pingInterval);
     console.warn("WebSocket disconnected. Reconnecting in 3s...");
     setTimeout(connectBybitWebSocket, 3000);
   };
 }
 
-// Push live ticks to backend and get updated holdings/trades
+// Push live Bybit ticks to Python backend
 async function syncWithServer() {
   if (!isRunning || Object.keys(livePrices).length === 0) return;
 
@@ -168,10 +251,8 @@ async function syncWithServer() {
 
     if (tickRes.ok) {
       const res = await fetch("/state");
-      if (res.ok) {
-        const data = await res.json();
-        updateUI(data);
-      }
+      const state = await res.json();
+      updateUI(state);
     }
   } catch (err) {
     console.warn("Sync error:", err);
@@ -179,8 +260,9 @@ async function syncWithServer() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  initCharts();
   connectBybitWebSocket();
-  setInterval(syncWithServer, 2000);
+  setInterval(syncWithServer, 3000);
 
   const pauseBtn = document.getElementById("pause-btn");
   if (pauseBtn) {
